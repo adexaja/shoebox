@@ -1,0 +1,30 @@
+# Planning docs live one level up in the workspace, not here.
+/docs/
+
+# Binaries
+/shoebox
+/shoeboxd
+/bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+coverage.*
+*.coverprofile
+/htmlcov/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Env / local
+.env
+.env.local
+*.local
