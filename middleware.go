@@ -6,7 +6,7 @@ import (
 	"runtime/debug"
 	"time"
 
-	"github.com/rezki/shoebox/internal/broker"
+	"github.com/adexaja/shoebox/internal/broker"
 )
 
 // Middleware wraps a HandlerFunc. The chain is composed left-to-right: the

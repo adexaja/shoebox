@@ -14,8 +14,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/rezki/shoebox"
-	"github.com/rezki/shoebox/internal/retry"
+	"github.com/adexaja/shoebox"
+	"github.com/adexaja/shoebox/internal/retry"
 )
 
 func main() {

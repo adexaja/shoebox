@@ -11,7 +11,7 @@ existed.
 ## Quick start
 
 ```go
-import "github.com/rezki/shoebox"
+import "github.com/adexaja/shoebox"
 
 func main() {
     q := shoebox.New(shoebox.Options{

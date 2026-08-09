@@ -1,3 +1,3 @@
-module github.com/rezki/shoebox
+module github.com/adexaja/shoebox
 
 go 1.26

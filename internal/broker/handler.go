@@ -4,8 +4,8 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/rezki/shoebox/internal/retry"
-	"github.com/rezki/shoebox/internal/storage"
+	"github.com/adexaja/shoebox/internal/retry"
+	"github.com/adexaja/shoebox/internal/storage"
 )
 
 // HandlerFunc is the function signature of a registered handler. It is

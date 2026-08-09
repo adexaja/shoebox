@@ -1,6 +1,6 @@
 package shoebox
 
-import "github.com/rezki/shoebox/internal/storage"
+import "github.com/adexaja/shoebox/internal/storage"
 
 // Message is the unit of work passed between Enqueue and a registered handler.
 //

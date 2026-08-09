@@ -4,7 +4,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/rezki/shoebox/internal/retry"
+	"github.com/adexaja/shoebox/internal/retry"
 )
 
 // StorageKind selects a storage backend. Only Memory is implemented in Week 1;

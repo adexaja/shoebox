@@ -9,9 +9,9 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/rezki/shoebox/internal/broker"
-	"github.com/rezki/shoebox/internal/retry"
-	"github.com/rezki/shoebox/internal/storage"
+	"github.com/adexaja/shoebox/internal/broker"
+	"github.com/adexaja/shoebox/internal/retry"
+	"github.com/adexaja/shoebox/internal/storage"
 )
 
 // Queue is the public-facing message queue. It is safe for concurrent use.

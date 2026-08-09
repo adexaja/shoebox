@@ -9,7 +9,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/rezki/shoebox"
+	"github.com/adexaja/shoebox"
 )
 
 func main() {

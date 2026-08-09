@@ -13,8 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/rezki/shoebox/internal/retry"
-	"github.com/rezki/shoebox/internal/storage"
+	"github.com/adexaja/shoebox/internal/retry"
+	"github.com/adexaja/shoebox/internal/storage"
 )
 
 // Options configures a Broker.

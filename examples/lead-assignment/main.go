@@ -16,7 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/rezki/shoebox"
+	"github.com/adexaja/shoebox"
 )
 
 type lead struct {
