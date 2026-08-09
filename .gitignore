@@ -28,3 +28,5 @@ coverage.*
 .env
 .env.local
 *.local
+.serena
+.claude/.headroom*

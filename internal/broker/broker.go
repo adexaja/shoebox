@@ -30,16 +30,34 @@ type Broker struct {
 	concurrency int
 	logger      logSink
 
-	mwMu  sync.RWMutex
-	mw    []Middleware
+	mwMu sync.RWMutex
+	mw   []Middleware
 
 	hMu       sync.RWMutex
 	handlers  map[string]*handler
 	dispatchC map[string]chan struct{} // one wakeup channel per queue
+	inflight  map[string]*atomic.Int64 // per-queue in-flight worker count (drain quiescence)
+	workerMu  sync.Mutex               // protects the inflight map values during access
 
+	// stopCh  closes to initiate a graceful drain: dispatchers drain their
+	//         queue to quiescence (including follow-up enqueues) then exit.
+	// abortCh closes to force-abort: dispatchers exit immediately, leaving
+	//         in-flight workers to finish on their own. Used when Shutdown's
+	//         ctx expires.
 	stopOnce sync.Once
 	stopCh   chan struct{}
-	wg       sync.WaitGroup
+	abortOnce sync.Once
+	abortCh   chan struct{}
+	wg        sync.WaitGroup // counts dispatchers + workers; Shutdown waits on this
+
+	closeOnce sync.Once
+	closed    atomic.Bool
+
+	// shutdownCtx is the context Shutdown hands to all store calls so a
+	// blocking backend can observe cancellation. Defaults to Background until
+	// Shutdown replaces it.
+	shutdownCtx    context.Context
+	shutdownCtxMu  sync.RWMutex
 
 	shuttingDown atomic.Bool
 }
@@ -58,7 +76,10 @@ func New(opts Options) *Broker {
 		logger:      opts.Logger,
 		handlers:    make(map[string]*handler),
 		dispatchC:   make(map[string]chan struct{}),
+		inflight:    make(map[string]*atomic.Int64),
 		stopCh:      make(chan struct{}),
+		abortCh:     make(chan struct{}),
+		shutdownCtx: context.Background(),
 	}
 }
 
@@ -99,10 +120,20 @@ func (b *Broker) Register(queue string, fn HandlerFunc, opts HandlerOptions) {
 		// Spawn one dispatcher goroutine per queue; it pulls workers off
 		// the shared storage.
 		b.dispatchC[queue] = make(chan struct{}, 1)
+		b.inflight[queue] = &atomic.Int64{}
 		b.wg.Add(1)
 		go b.dispatch(queue)
 	}
 	b.hMu.Unlock()
+}
+
+// storeCtx returns the context to use for storage calls. During shutdown it
+// is the Shutdown caller's ctx (so blocking backends can be cancelled);
+// otherwise it is context.Background(). See E1-CONC-6.
+func (b *Broker) storeCtx() context.Context {
+	b.shutdownCtxMu.RLock()
+	defer b.shutdownCtxMu.RUnlock()
+	return b.shutdownCtx
 }
 
 // Enqueue adds a message to the queue and pokes the dispatcher. It is
@@ -153,25 +184,56 @@ type EnqueueOpts struct {
 }
 
 // dispatch is the per-queue worker loop. It runs `concurrency` handlers
-// concurrently and pulls the next batch from storage as soon as any
-// worker is free.
+// concurrently and pulls the next batch from storage as soon as any worker is
+// free.
+//
+// Shutdown semantics (see ADR 0002, drain amendment):
+//   - When stopCh closes, the dispatcher enters drain mode: it keeps
+//     dequeueing and processing until a dequeue returns empty AND its
+//     per-queue in-flight worker counter is zero (so no surviving handler
+//     can re-enqueue after the decision), then exits. This is the
+//     authoritative quiescence check that fixes E1-CONC-1/4.
+//   - When abortCh closes (Shutdown ctx expired), the dispatcher exits
+//     immediately; in-flight workers finish on their own and are tracked by
+//     the global wg (CONC-2: one unified exit path).
 func (b *Broker) dispatch(queue string) {
 	defer b.wg.Done()
 
 	sem := make(chan struct{}, b.concurrency)
 	for {
-		msgs, err := b.store.Dequeue(context.Background(), queue, b.concurrency)
-		if err != nil {
-			if !errors.Is(err, storage.ErrEmpty) {
-				b.logger.ErrorContext(context.Background(), "shoebox: dequeue error",
-					slog.String("queue", queue), slog.Any("err", err))
+		// Hard-abort wins over everything.
+		select {
+		case <-b.abortCh:
+			return
+		default:
+		}
+
+		msgs, err := b.store.Dequeue(b.storeCtx(), queue, b.concurrency)
+		if err != nil && !errors.Is(err, storage.ErrEmpty) {
+			b.logger.ErrorContext(b.storeCtx(), "shoebox: dequeue error",
+				slog.String("queue", queue), slog.Any("err", err))
+		}
+
+		if len(msgs) == 0 {
+			// Nothing ready right now. Either idle, or draining.
+			select {
+			case <-b.abortCh:
+				return
+			default:
 			}
-			// Nothing to do — wait for a wakeup, a stop, or a periodic tick.
+
+			if b.draining() && b.quiescent(queue) {
+				// Authoritative drain-complete for this queue: the queue is
+				// empty AND no worker is in flight, so nothing can re-enqueue
+				// after we exit.
+				return
+			}
+
 			b.hMu.RLock()
 			wake := b.dispatchC[queue]
 			b.hMu.RUnlock()
 			select {
-			case <-b.stopCh:
+			case <-b.abortCh:
 				return
 			case <-wake:
 			case <-time.After(250 * time.Millisecond):
@@ -184,14 +246,50 @@ func (b *Broker) dispatch(queue string) {
 		for i := range msgs {
 			msg := msgs[i]
 			sem <- struct{}{}
+			ifq := b.inflightFor(queue)
+			ifq.Add(1)
 			b.wg.Add(1)
 			go func() {
 				defer b.wg.Done()
+				defer ifq.Add(-1)
 				defer func() { <-sem }()
 				b.handleOne(queue, msg)
 			}()
 		}
 	}
+}
+
+// draining reports whether a graceful drain has been requested.
+func (b *Broker) draining() bool {
+	select {
+	case <-b.stopCh:
+		return true
+	default:
+		return false
+	}
+}
+
+// quiescent reports whether a queue has no in-flight workers. Combined with
+// "a dequeue returned empty," this is the authoritative drain condition — no
+// surviving handler can re-enqueue after this returns true. See E1-CONC-1.
+func (b *Broker) quiescent(queue string) bool {
+	return b.inflightFor(queue).Load() == 0
+}
+
+// inflightFor returns the per-queue in-flight worker counter. Guarded because
+// Shutdown may read it concurrently with the dispatcher. A counter is created
+// on demand for queues the broker writes to but never dispatches (e.g. a
+// {queue}.dlq shadow queue); it stays at zero, which is the correct quiescent
+// value for such queues.
+func (b *Broker) inflightFor(queue string) *atomic.Int64 {
+	b.workerMu.Lock()
+	defer b.workerMu.Unlock()
+	ifq, ok := b.inflight[queue]
+	if !ok {
+		ifq = &atomic.Int64{}
+		b.inflight[queue] = ifq
+	}
+	return ifq
 }
 
 // handleOne runs the registered handler for a single message. On success
@@ -206,7 +304,7 @@ func (b *Broker) handleOne(queue string, msg storage.Message) {
 		// races with Enqueue eventually picks the message up.
 		next := time.Now().Add(100 * time.Millisecond)
 		msg.ScheduledAt = next
-		_ = b.store.Enqueue(context.Background(), queue, msg)
+		_ = b.store.Enqueue(b.storeCtx(), queue, msg)
 		return
 	}
 
@@ -216,15 +314,18 @@ func (b *Broker) handleOne(queue string, msg storage.Message) {
 		return
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	// Per-handler deadline. Without this a wedged handler hangs the drain
+	// forever; with it, the context expires and the handler (if cooperative)
+	// returns, letting the drain progress. See E1-CONC-3.
+	ctx, cancel := b.handlerCtx(h)
 	defer cancel()
 	err := h.chain(ctx, msg)
 	if err == nil {
-		_ = b.store.Ack(context.Background(), queue, msg.ID)
+		_ = b.store.Ack(b.storeCtx(), queue, msg.ID)
 		return
 	}
 
-	b.logger.WarnContext(context.Background(), "shoebox: handler error",
+	b.logger.WarnContext(b.storeCtx(), "shoebox: handler error",
 		slog.String("queue", queue),
 		slog.String("id", msg.ID),
 		slog.Int("attempt", msg.Attempts),
@@ -238,11 +339,21 @@ func (b *Broker) handleOne(queue string, msg storage.Message) {
 
 	delay := h.opts.Backoff.Next(msg.Attempts)
 	msg.ScheduledAt = time.Now().Add(delay)
-	_ = b.store.Nack(context.Background(), queue, msg.ID, err)
-	if err := b.store.Enqueue(context.Background(), queue, msg); err != nil {
-		b.logger.ErrorContext(context.Background(), "shoebox: re-enqueue failed",
+	_ = b.store.Nack(b.storeCtx(), queue, msg.ID, err)
+	if err := b.store.Enqueue(b.storeCtx(), queue, msg); err != nil {
+		b.logger.ErrorContext(b.storeCtx(), "shoebox: re-enqueue failed",
 			slog.String("queue", queue), slog.String("id", msg.ID), slog.Any("err", err))
 	}
+}
+
+// handlerCtx builds the context handed to a handler: a cancellation that
+// respects the shutdown ctx, plus a per-handler Timeout deadline when set.
+func (b *Broker) handlerCtx(h *handler) (context.Context, context.CancelFunc) {
+	parent := b.storeCtx()
+	if h.opts.Timeout > 0 {
+		return context.WithTimeout(parent, h.opts.Timeout)
+	}
+	return context.WithCancel(parent)
 }
 
 // toDeadLetter writes the message to the {queue}.dlq shadow queue and
@@ -251,95 +362,83 @@ func (b *Broker) handleOne(queue string, msg storage.Message) {
 func (b *Broker) toDeadLetter(queue string, msg storage.Message) {
 	dlq := queue + ".dlq"
 	msg.ScheduledAt = time.Now()
-	if err := b.store.Enqueue(context.Background(), dlq, msg); err != nil {
-		b.logger.ErrorContext(context.Background(), "shoebox: dlq enqueue failed",
+	if err := b.store.Enqueue(b.storeCtx(), dlq, msg); err != nil {
+		b.logger.ErrorContext(b.storeCtx(), "shoebox: dlq enqueue failed",
 			slog.String("queue", queue), slog.String("id", msg.ID), slog.Any("err", err))
 	}
-	_ = b.store.Dead(context.Background(), queue, msg.ID, errors.New("max retries exceeded"))
+	_ = b.store.Dead(b.storeCtx(), queue, msg.ID, errors.New("max retries exceeded"))
 }
 
-// Shutdown drains the queues and stops the dispatchers. It waits for:
+// Shutdown drains the queues and stops the dispatchers.
 //
-//  1. All in-flight handlers to complete (including any follow-up
-//     enqueues they make, recursively).
-//  2. All queues to be empty (no more messages waiting to be delivered).
-//  3. Dispatcher goroutines to exit.
+// It initiates a graceful drain (close stopCh): each dispatcher processes its
+// queue to authoritative quiescence — empty AND no in-flight workers — then
+// exits, so follow-up enqueues made by in-flight handlers are not orphaned
+// (E1-CONC-1/4).
 //
-// Shutdown returns nil on a clean drain. If ctx expires before the
-// drain completes, Shutdown returns ctx.Err() and the dispatchers
-// are stopped regardless — in-flight work may be cut short.
+// Shutdown returns nil once all dispatchers and workers have exited, then
+// closes the store exactly once (E1-CONC-5). If ctx expires first, it
+// force-aborts (close abortCh) so dispatchers exit immediately; in-flight
+// workers that haven't returned are left to finish (tracked by wg) — their
+// work is best-effort at that point.
+//
+// There is a single exit path either way: wait on wg (bounded by abort), then
+// closeOnce(store.Close). No branch returns without closing the store
+// (E1-CONC-2).
 func (b *Broker) Shutdown(ctx context.Context) error {
+	if b.closed.Swap(true) {
+		return errAlreadyClosed
+	}
 	b.shuttingDown.Store(true)
 
-	// Wake all dispatchers so they observe the drain request.
+	// Hand our ctx to all storage calls so a blocking backend can be
+	// cancelled once we start tearing down (E1-CONC-6). We wrap it so that
+	// even after ctx expires we keep a non-nil context for the final
+	// wg.Wait()/Close.
+	shutdownCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	b.shutdownCtxMu.Lock()
+	b.shutdownCtx = shutdownCtx
+	b.shutdownCtxMu.Unlock()
+
+	// 1) Request graceful drain.
+	b.stopOnce.Do(func() { close(b.stopCh) })
+	b.wakeAll()
+
+	// 2) Wait for dispatchers+workers to exit, or force-abort on ctx expiry.
+	done := make(chan struct{})
+	go func() { b.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		b.closeOnce.Do(func() { _ = b.store.Close() })
+		return nil
+	case <-ctx.Done():
+		// Force-abort: dispatchers exit immediately; workers finish on their
+		// own (wg covers them). We MUST still wait for wg so we don't close
+		// the store under a running worker.
+		b.abortOnce.Do(func() { close(b.abortCh) })
+		// Give workers a bounded chance to notice ctx cancellation through
+		// handlerCtx; then wait regardless.
+		<-done
+		b.closeOnce.Do(func() { _ = b.store.Close() })
+		return ctx.Err()
+	}
+}
+
+// wakeAll nudges every dispatcher's wakeup channel.
+func (b *Broker) wakeAll() {
 	b.hMu.RLock()
+	defer b.hMu.RUnlock()
 	for _, wake := range b.dispatchC {
 		select {
 		case wake <- struct{}{}:
 		default:
 		}
 	}
-	b.hMu.RUnlock()
-
-	// Wait for queues to empty, or for ctx to expire.
-	poll := time.NewTicker(50 * time.Millisecond)
-	defer poll.Stop()
-	for {
-		if b.allQueuesEmpty() {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			// Force-stop everything.
-			b.stopOnce.Do(func() { close(b.stopCh) })
-			b.wg.Wait()
-			return ctx.Err()
-		case <-poll.C:
-		}
-		// Keep nudging in case new messages were enqueued mid-drain.
-		b.hMu.RLock()
-		for _, wake := range b.dispatchC {
-			select {
-			case wake <- struct{}{}:
-			default:
-			}
-		}
-		b.hMu.RUnlock()
-	}
-
-	// All queues empty. Signal dispatchers to exit and wait.
-	b.stopOnce.Do(func() { close(b.stopCh) })
-	done := make(chan struct{})
-	go func() { b.wg.Wait(); close(done) }()
-
-	select {
-	case <-done:
-		return b.store.Close()
-	case <-ctx.Done():
-		return ctx.Err()
-	}
 }
 
-// allQueuesEmpty returns true when every known queue has depth 0.
-func (b *Broker) allQueuesEmpty() bool {
-	b.hMu.RLock()
-	queues := make([]string, 0, len(b.handlers))
-	for q := range b.handlers {
-		queues = append(queues, q)
-	}
-	b.hMu.RUnlock()
-
-	for _, q := range queues {
-		s, err := b.store.Stats(context.Background(), q)
-		if err != nil {
-			return false
-		}
-		if s.Depth > 0 {
-			return false
-		}
-	}
-	return true
-}
+// errAlreadyClosed is returned by a second Shutdown call.
+var errAlreadyClosed = errors.New("shoebox: queue already shut down")
 
 // Healthy reports whether the broker is still dispatching. It returns
 // false once Shutdown has been called.

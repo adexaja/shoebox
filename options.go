@@ -47,6 +47,13 @@ type HandlerOptions struct {
 	// Backoff computes the delay before a retry. Defaults to exponential
 	// 1s..60s.
 	Backoff retry.Backoff
+
+	// Timeout is the per-message deadline handed to the handler via its
+	// context. Zero means no deadline (the handler runs until it returns).
+	// A non-zero Timeout is what lets Shutdown actually complete when a
+	// handler is wedged — without it, a blocked handler hangs the drain
+	// forever. See ADR 0002 (drain amendment).
+	Timeout time.Duration
 }
 
 // EnqueueOptions is a functional-options bundle for Enqueue.

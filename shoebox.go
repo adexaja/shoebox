@@ -82,6 +82,7 @@ func (q *Queue) Handle(queue string, h HandlerFunc, opts ...HandlerOptions) {
 	q.b.Register(queue, h, broker.HandlerOptions{
 		MaxRetries: ho.MaxRetries,
 		Backoff:    ho.Backoff,
+		Timeout:    ho.Timeout,
 	})
 }
 

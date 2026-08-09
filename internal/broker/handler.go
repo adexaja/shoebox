@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/adexaja/shoebox/internal/retry"
 	"github.com/adexaja/shoebox/internal/storage"
@@ -27,6 +28,7 @@ type handler struct {
 type HandlerOptions struct {
 	MaxRetries int
 	Backoff    retry.Backoff
+	Timeout    time.Duration
 }
 
 // logSink is the subset of *slog.Logger the broker uses. It exists so
