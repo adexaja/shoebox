@@ -56,7 +56,10 @@ func buildStorage(ctx context.Context, opts Options) (storage.Storage, error) {
 		}
 		return storage.NewSQLite(ctx, opts.Path)
 	case Postgres:
-		return nil, fmt.Errorf("shoebox: Postgres storage is not yet implemented (see docs/tasks/E2-persistence.md)")
+		if opts.DSN == "" {
+			return nil, fmt.Errorf("shoebox: Postgres storage requires Options.DSN")
+		}
+		return storage.NewPostgres(ctx, opts.DSN)
 	default:
 		return nil, fmt.Errorf("shoebox: unknown storage kind %d", opts.Storage)
 	}

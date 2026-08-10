@@ -1,28 +1,375 @@
-// Package storage — Postgres backend.
-//
-// Will use pgx and SELECT ... FOR UPDATE SKIP LOCKED for concurrent
-// consumers (see PRD §Key Design Decisions #1, ADR 0004). The schema mirrors
-// SQLite (PRD §Data Model); the only differences are:
-//   - metadata uses native JSONB (not TEXT-encoded JSON)
-//   - timestamps use native TIMESTAMPTZ (not RFC 3339 strings)
-//   - Dequeue uses FOR UPDATE SKIP LOCKED instead of a single-writer mutex
-//
-// Not yet implemented. The interface contract and lifecycle (pending →
-// processing → deleted, with Reclaim on open) are identical to SQLite.
 package storage
 
-// TODO(E2): implement Postgres using pgx with SKIP LOCKED dequeue.
-// Design sketch:
+import (
+	"context"
+	_ "embed"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// Postgres is a persistent storage backend using an external PostgreSQL
+// database. It uses pgx/v5 with a connection pool (pgxpool) for concurrent
+// access, and SELECT … FOR UPDATE SKIP LOCKED for safe concurrent dequeue
+// without double-delivery (E2-S4). Multiple consumer processes can pull from
+// the same queue without conflict.
 //
-//	func NewPostgres(ctx context.Context, dsn string) (*Postgres, error)
-//
-//	func (p *Postgres) Dequeue(ctx, queue, limit) {
-//	    BEGIN
-//	    SELECT id, ... FROM shoebox_messages
-//	     WHERE queue = $1 AND status = 'pending' AND scheduled_at <= now()
-//	     ORDER BY created_at
-//	     LIMIT $2
-//	     FOR UPDATE SKIP LOCKED
-//	    UPDATE shoebox_messages SET status = 'processing' WHERE id IN (...)
-//	    COMMIT
-//	}
+// The schema mirrors SQLite (PRD §Data Model) with native JSONB metadata
+// and TIMESTAMPTZ. The status lifecycle (pending → processing → deleted)
+// provides crash recovery via Reclaim, identical to SQLite.
+type Postgres struct {
+	pool *pgxpool.Pool
+}
+
+//go:embed schema_postgres.sql
+var postgresSchema string
+
+// NewPostgres opens a connection pool to the Postgres database at dsn,
+// initialises the schema, and reclaims stale 'processing' rows from any
+// previous crash (E2-S1). The dsn should be a standard Postgres connection
+// string, e.g. "[REDACTED:connection_string]localhost:5432/shoebox?sslmode=disable".
+func NewPostgres(ctx context.Context, dsn string) (*Postgres, error) {
+	config, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("shoebox/postgres: parse dsn: %w", err)
+	}
+
+	// Sensible pool defaults for shoebox's target scale (hundreds to low
+	// thousands of msgs/min). Users with higher throughput can tune via
+	// the DSN's pool_max_conns etc.
+	config.MaxConns = 10
+	config.MinConns = 2
+	config.MaxConnLifetime = 30 * time.Minute
+	config.MaxConnIdleTime = 5 * time.Minute
+
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("shoebox/postgres: connect: %w", err)
+	}
+
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("shoebox/postgres: ping: %w", err)
+	}
+
+	if _, err := pool.Exec(ctx, postgresSchema); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("shoebox/postgres: init schema: %w", err)
+	}
+
+	// Reclaim stale in-flight messages from a previous crash (same as SQLite).
+	if _, err := pool.Exec(ctx,
+		`UPDATE shoebox_messages SET status = 'pending' WHERE status = 'processing'`); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("shoebox/postgres: reclaim: %w", err)
+	}
+
+	return &Postgres{pool: pool}, nil
+}
+
+// Enqueue persists a new message with status 'pending'.
+func (p *Postgres) Enqueue(ctx context.Context, queue string, msg Message) error {
+	meta, err := json.Marshal(msg.Metadata)
+	if err != nil {
+		return fmt.Errorf("shoebox/postgres: marshal metadata: %w", err)
+	}
+	if msg.CreatedAt.IsZero() {
+		msg.CreatedAt = time.Now()
+	}
+	if msg.ScheduledAt.IsZero() {
+		msg.ScheduledAt = time.Now()
+	}
+	payload := msg.Payload
+	if payload == nil {
+		payload = []byte{}
+	}
+
+	var deadAt any
+	if !msg.DeadAt.IsZero() {
+		deadAt = msg.DeadAt
+	}
+
+	_, err = p.pool.Exec(ctx, `INSERT INTO shoebox_messages
+		(id, queue, payload, attempts, max_retries, created_at, scheduled_at, metadata, error, dead_at, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending')`,
+		msg.ID, queue, payload, msg.Attempts, msg.MaxRetries,
+		msg.CreatedAt, msg.ScheduledAt, meta, msg.Error, deadAt,
+	)
+	if err != nil {
+		return fmt.Errorf("shoebox/postgres: enqueue: %w", err)
+	}
+	return nil
+}
+
+// Dequeue uses SELECT … FOR UPDATE SKIP LOCKED to atomically claim up to
+// `limit` due messages. This allows multiple consumer processes to pull from
+// the same queue without double-delivery (E2-S4): each consumer locks its
+// rows, so no two consumers ever see the same message.
+func (p *Postgres) Dequeue(ctx context.Context, queue string, limit int) ([]Message, error) {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("shoebox/postgres: dequeue begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	rows, err := tx.Query(ctx,
+		`SELECT id, payload, attempts, max_retries, created_at, scheduled_at, metadata, error, dead_at
+		 FROM shoebox_messages
+		 WHERE queue = $1 AND status = 'pending' AND scheduled_at <= now()
+		 ORDER BY created_at ASC
+		 LIMIT $2
+		 FOR UPDATE SKIP LOCKED`,
+		queue, limit)
+	if err != nil {
+		return nil, fmt.Errorf("shoebox/postgres: dequeue query: %w", err)
+	}
+
+	var msgs []Message
+	for rows.Next() {
+		m, err := scanPostgresMessage(rows)
+		if err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("shoebox/postgres: dequeue scan: %w", err)
+		}
+		m.Queue = queue
+		msgs = append(msgs, m)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("shoebox/postgres: dequeue rows: %w", err)
+	}
+
+	if len(msgs) == 0 {
+		return nil, ErrEmpty
+	}
+
+	for i := range msgs {
+		if _, err := tx.Exec(ctx,
+			`UPDATE shoebox_messages SET status = 'processing' WHERE id = $1 AND queue = $2`,
+			msgs[i].ID, queue); err != nil {
+			return nil, fmt.Errorf("shoebox/postgres: dequeue mark processing: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("shoebox/postgres: dequeue commit: %w", err)
+	}
+	return msgs, nil
+}
+
+// Ack removes a successfully processed message and bumps the processed counter.
+func (p *Postgres) Ack(ctx context.Context, queue, msgID string) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("shoebox/postgres: ack begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM shoebox_messages WHERE id = $1 AND queue = $2`, msgID, queue); err != nil {
+		return fmt.Errorf("shoebox/postgres: ack delete: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO shoebox_stats (queue, processed, errors, retries, dead)
+		 VALUES ($1, 1, 0, 0, 0)
+		 ON CONFLICT(queue) DO UPDATE SET processed = shoebox_stats.processed + 1`,
+		queue); err != nil {
+		return fmt.Errorf("shoebox/postgres: ack stats: %w", err)
+	}
+
+	return tx.Commit(ctx)
+}
+
+// Nack records a failed delivery. The broker re-enqueues the message with a
+// future ScheduledAt; this method removes the current row and bumps counters.
+func (p *Postgres) Nack(ctx context.Context, queue, msgID string, nakErr error) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("shoebox/postgres: nack begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM shoebox_messages WHERE id = $1 AND queue = $2`, msgID, queue); err != nil {
+		return fmt.Errorf("shoebox/postgres: nack delete: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO shoebox_stats (queue, processed, errors, retries, dead)
+		 VALUES ($1, 0, 1, 1, 0)
+		 ON CONFLICT(queue) DO UPDATE SET errors = shoebox_stats.errors + 1, retries = shoebox_stats.retries + 1`,
+		queue); err != nil {
+		return fmt.Errorf("shoebox/postgres: nack stats: %w", err)
+	}
+
+	return tx.Commit(ctx)
+}
+
+// Dead marks a message as dead (DLQ) and bumps the dead counter.
+func (p *Postgres) Dead(ctx context.Context, queue, msgID string, deadErr error) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("shoebox/postgres: dead begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	errStr := ""
+	if deadErr != nil {
+		errStr = deadErr.Error()
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE shoebox_messages SET status = 'dead', error = $1, dead_at = now()
+		 WHERE id = $2 AND queue = $3`,
+		errStr, msgID, queue); err != nil {
+		return fmt.Errorf("shoebox/postgres: dead update: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO shoebox_stats (queue, processed, errors, retries, dead)
+		 VALUES ($1, 0, 0, 0, 1)
+		 ON CONFLICT(queue) DO UPDATE SET dead = shoebox_stats.dead + 1`,
+		queue); err != nil {
+		return fmt.Errorf("shoebox/postgres: dead stats: %w", err)
+	}
+
+	return tx.Commit(ctx)
+}
+
+// List returns up to `limit` dead messages from a queue (DLQ inspection).
+func (p *Postgres) List(ctx context.Context, queue string, limit int) ([]Message, error) {
+	rows, err := p.pool.Query(ctx,
+		`SELECT id, payload, attempts, max_retries, created_at, scheduled_at, metadata, error, dead_at
+		 FROM shoebox_messages
+		 WHERE queue = $1 AND status = 'dead'
+		 ORDER BY dead_at DESC
+		 LIMIT $2`,
+		queue, limit)
+	if err != nil {
+		return nil, fmt.Errorf("shoebox/postgres: list query: %w", err)
+	}
+	defer rows.Close()
+
+	var msgs []Message
+	for rows.Next() {
+		m, err := scanPostgresMessage(rows)
+		if err != nil {
+			return nil, fmt.Errorf("shoebox/postgres: list scan: %w", err)
+		}
+		m.Queue = queue
+		msgs = append(msgs, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("shoebox/postgres: list rows: %w", err)
+	}
+	if len(msgs) == 0 {
+		return nil, ErrEmpty
+	}
+	return msgs, nil
+}
+
+// Reclaim transitions stale 'processing' messages back to 'pending' for the
+// given queue (crash recovery, E2-S1).
+func (p *Postgres) Reclaim(ctx context.Context, queue string) error {
+	_, err := p.pool.Exec(ctx,
+		`UPDATE shoebox_messages SET status = 'pending' WHERE queue = $1 AND status = 'processing'`,
+		queue)
+	if err != nil {
+		return fmt.Errorf("shoebox/postgres: reclaim: %w", err)
+	}
+	return nil
+}
+
+// Stats returns a snapshot of queue statistics.
+func (p *Postgres) Stats(ctx context.Context, queue string) (QueueStats, error) {
+	var s QueueStats
+	s.Queue = queue
+
+	row := p.pool.QueryRow(ctx,
+		`SELECT processed, errors, retries, dead FROM shoebox_stats WHERE queue = $1`,
+		queue)
+	var processed, errs, retries, dead int64
+	if err := row.Scan(&processed, &errs, &retries, &dead); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// No stats row yet — depth may still be non-zero.
+		} else {
+			return QueueStats{}, fmt.Errorf("shoebox/postgres: stats query: %w", err)
+		}
+	}
+	s.Processed = uint64(processed)
+	s.Errors = uint64(errs)
+	s.Retries = uint64(retries)
+	s.Dead = uint64(dead)
+
+	var depth int
+	if err := p.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM shoebox_messages WHERE queue = $1 AND status = 'pending'`,
+		queue).Scan(&depth); err != nil {
+		return QueueStats{}, fmt.Errorf("shoebox/postgres: stats depth: %w", err)
+	}
+	s.Depth = depth
+	return s, nil
+}
+
+// Close closes the connection pool.
+func (p *Postgres) Close() error {
+	if p.pool == nil {
+		return nil
+	}
+	p.pool.Close()
+	return nil
+}
+
+// scanPostgresMessage scans a pgx.Rows row into a Message. Postgres returns
+// native TIMESTAMPTZ (parsed directly into time.Time) and JSONB (parsed as
+// raw []byte into the metadata map).
+func scanPostgresMessage(rows pgx.Rows) (Message, error) {
+	var m Message
+	var metaBytes []byte
+	var deadAt pgxType
+
+	if err := rows.Scan(
+		&m.ID, &m.Payload, &m.Attempts, &m.MaxRetries,
+		&m.CreatedAt, &m.ScheduledAt, &metaBytes, &m.Error, &deadAt.val,
+	); err != nil {
+		return m, err
+	}
+
+	if len(metaBytes) > 0 && string(metaBytes) != "{}" {
+		if err := json.Unmarshal(metaBytes, &m.Metadata); err != nil {
+			return m, fmt.Errorf("parse metadata: %w", err)
+		}
+	}
+	m.DeadAt = deadAt.Time()
+	return m, nil
+}
+
+// pgxType wraps a nullable TIMESTAMPTZ scanner. Postgres returns NULL for
+// unset dead_at; we need to distinguish "no value" from "zero time".
+type pgxType struct {
+	val  any
+	set  bool
+	time time.Time
+}
+
+func (p *pgxType) Scan(src any) error {
+	if src == nil {
+		p.set = false
+		return nil
+	}
+	t, ok := src.(time.Time)
+	if !ok {
+		return fmt.Errorf("shoebox/postgres: cannot scan %T into time.Time", src)
+	}
+	p.time = t
+	p.set = true
+	return nil
+}
+
+func (p *pgxType) Time() time.Time {
+	if !p.set {
+		return time.Time{}
+	}
+	return p.time
+}

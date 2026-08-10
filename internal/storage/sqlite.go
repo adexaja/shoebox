@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,35 +24,8 @@ type SQLite struct {
 	db *sql.DB
 }
 
-// schemaSQL is the shared schema from the PRD §Data Model, adapted for
-// SQLite (JSONB → TEXT with JSON encoding; TIMESTAMPTZ → TEXT with RFC 3339
-// strings per ADR 0005).
-const schemaSQL = `
-CREATE TABLE IF NOT EXISTS shoebox_messages (
-    id           TEXT PRIMARY KEY,
-    queue        TEXT NOT NULL,
-    payload      BLOB NOT NULL,
-    attempts     INTEGER DEFAULT 0,
-    max_retries  INTEGER DEFAULT 5,
-    created_at   TEXT NOT NULL,
-    scheduled_at TEXT NOT NULL,
-    metadata     TEXT DEFAULT '{}',
-    error        TEXT DEFAULT '',
-    dead_at      TEXT DEFAULT '',
-    status       TEXT DEFAULT 'pending'
-);
-
-CREATE INDEX IF NOT EXISTS idx_shoebox_dequeue ON shoebox_messages(queue, status, scheduled_at);
-CREATE INDEX IF NOT EXISTS idx_shoebox_dlq    ON shoebox_messages(queue, status);
-
-CREATE TABLE IF NOT EXISTS shoebox_stats (
-    queue     TEXT PRIMARY KEY,
-    processed INTEGER DEFAULT 0,
-    errors    INTEGER DEFAULT 0,
-    retries   INTEGER DEFAULT 0,
-    dead      INTEGER DEFAULT 0
-);
-`
+//go:embed schema_sqlite.sql
+var schemaSQL string
 
 // NewSQLite opens (or creates) a SQLite database at path and initialises the
 // schema. It also reclaims any "processing" rows left by a previous crash
