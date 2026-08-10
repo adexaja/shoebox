@@ -1,0 +1,47 @@
+{{define "stats.html"}}
+<table>
+	<thead>
+		<tr>
+			<th>Queue</th>
+			<th>Depth</th>
+			<th>Processed</th>
+			<th>Errors</th>
+			<th>Retries</th>
+			<th>Dead</th>
+		</tr>
+	</thead>
+	<tbody>
+	{{- range .Queues}}
+		<tr>
+			<td>
+				<strong>{{.Name}}</strong>
+				{{if gt .Dead 0}}
+					<span class="badge badge-err" title="dead-lettered messages">{{.Dead}}</span>
+				{{end}}
+			</td>
+			<td>{{.Depth}}</td>
+			<td>{{.Processed}}</td>
+			<td>
+				{{if gt .Errors 0}}<span class="badge badge-warn">{{.Errors}}</span>{{else}}0{{end}}
+			</td>
+			<td>{{.Retries}}</td>
+			<td>{{.Dead}}</td>
+		</tr>
+		<tr>
+			<td colspan="6">
+				<details>
+					<summary>DLQ browser ({{.Dead}} dead)</summary>
+					<div class="dlq-section"
+					     hx-get="/partials/dlq?queue={{.Name}}"
+					     hx-trigger="intersect"
+					     hx-swap="innerHTML">
+					</div>
+				</details>
+			</td>
+		</tr>
+	{{- else}}
+		<tr><td colspan="6"><em>No queues registered.</em></td></tr>
+	{{- end}}
+	</tbody>
+</table>
+{{end}}

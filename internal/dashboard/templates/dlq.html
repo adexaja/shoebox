@@ -1,0 +1,29 @@
+{{define "dlq.html"}}
+{{- if .Records}}
+<table>
+	<thead>
+		<tr>
+			<th>ID</th>
+			<th>Attempts</th>
+			<th>Dead At</th>
+			<th>Error</th>
+			<th>Payload</th>
+		</tr>
+	</thead>
+	<tbody>
+	{{- range .Records}}
+		<tr>
+			<td class="mono">{{.ID}}</td>
+			<td>{{.Attempts}}</td>
+			<td>{{.DeadAt.Format "2006-01-02 15:04:05"}}</td>
+			<td>{{.Error}}</td>
+			<td class="mono">{{truncate .Payload 80}}</td>
+		</tr>
+	{{- end}}
+	</tbody>
+</table>
+{{- else}}
+<p><em>No dead-lettered messages for {{.Queue}}.</em></p>
+{{- end}}
+{{end}}
+

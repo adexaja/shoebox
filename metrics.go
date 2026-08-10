@@ -34,6 +34,12 @@ func NewMetrics(namespace string, registerer prometheus.Registerer) *Metrics {
 	if registerer == nil {
 		registerer = prometheus.DefaultRegisterer
 	}
+	// Guard against typed-nil: DefaultRegisterer can wrap a nil *Registry
+	// in rare init-order edge cases (Go 1.26 + dependency cycles). Fall
+	// back to a fresh registry so the caller never sees a nil panic.
+	if registerer == prometheus.Registerer((*prometheus.Registry)(nil)) {
+		registerer = prometheus.NewRegistry()
+	}
 	if namespace == "" {
 		namespace = "shoebox"
 	}
@@ -71,6 +77,11 @@ func NewMetrics(namespace string, registerer prometheus.Registerer) *Metrics {
 			Buckets:   prometheus.DefBuckets,
 		}, []string{"queue"}),
 	}
-	registerer.MustRegister(m.Processed, m.Errors, m.Retries, m.Dead, m.Depth, m.Duration)
+	registerer.MustRegister(m.Processed)
+	registerer.MustRegister(m.Errors)
+	registerer.MustRegister(m.Retries)
+	registerer.MustRegister(m.Dead)
+	registerer.MustRegister(m.Depth)
+	registerer.MustRegister(m.Duration)
 	return m
 }

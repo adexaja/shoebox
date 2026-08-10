@@ -1,0 +1,32 @@
+{{define "layout.html"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>shoebox — dashboard</title>
+	<script src="https://unpkg.com/htmx.org@2.0.4" integrity="sha384-HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwDvnOCIsNbmpTsi264s" crossorigin="anonymous"></script>
+	<style>
+		:root { color-scheme: light dark; }
+		body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 64rem; }
+		h1 { font-size: 1.5rem; }
+		h1 small { font-size: 1rem; font-weight: normal; opacity: 0.6; }
+		table { border-collapse: collapse; width: 100%; }
+		th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid gray; }
+		.badge { display: inline-block; min-width: 1.5rem; text-align: center; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.85rem; }
+		.badge-ok { background: #1a7f37; color: #fff; }
+		.badge-warn { background: #bf8700; color: #fff; }
+		.badge-err { background: #cf222e; color: #fff; }
+		.dlq-section { margin-top: 1rem; }
+		details { margin-top: 0.5rem; }
+		summary { cursor: pointer; font-weight: 500; }
+		.mono { font-family: ui-monospace, monospace; font-size: 0.85rem; }
+	</style>
+</head>
+<body>
+	<h1>shoebox <small>queue dashboard</small></h1>
+
+	<div id="stats" hx-get="/partials/stats" hx-trigger="load, every 3s" hx-swap="innerHTML">
+		{{template "stats.html" .}}
+	</div>
+</body>
+</html>{{end}}

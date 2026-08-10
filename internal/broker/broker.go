@@ -5,8 +5,6 @@ package broker
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"log/slog"
 	"sync"
@@ -151,7 +149,7 @@ func (b *Broker) Enqueue(ctx context.Context, queue string, payload []byte, opts
 	}
 
 	msg := storage.Message{
-		ID:          newID(),
+		ID:          storage.NewMessageID(),
 		Queue:       queue,
 		Payload:     payload,
 		Attempts:    0,
@@ -470,24 +468,4 @@ func (b *Broker) Stats(ctx context.Context, queue string) (storage.QueueStats, e
 // can pass it to packages like dlq without a separate handle.
 func (b *Broker) Store() storage.Storage {
 	return b.store
-}
-
-// newID returns a 16-byte random hex string. We avoid pulling in a UUID
-// library to keep the dependency surface small (see ADR 0004); the value
-// only needs to be unique within a process for the in-memory backend,
-// and uniqueness across processes is handled by persistent backends
-// using their own ID strategies.
-func newID() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		// crypto/rand failing is unrecoverable on a healthy system; fall
-		// back to a time-based identifier so we never panic in a user's
-		// hot path.
-		now := time.Now().UnixNano()
-		return "ts-" + hex.EncodeToString([]byte{
-			byte(now >> 56), byte(now >> 48), byte(now >> 40), byte(now >> 32),
-			byte(now >> 24), byte(now >> 16), byte(now >> 8), byte(now),
-		})
-	}
-	return hex.EncodeToString(b[:])
 }

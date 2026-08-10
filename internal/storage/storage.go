@@ -8,6 +8,8 @@ package storage
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"time"
 )
@@ -69,4 +71,21 @@ type Storage interface {
 	List(ctx context.Context, queue string, limit int) ([]Message, error)
 	Reclaim(ctx context.Context, queue string) error
 	Close() error
+}
+
+// NewMessageID returns a 16-byte random hex string suitable for use as a
+// message ID. We avoid pulling in a UUID library to keep the dependency
+// surface small (see ADR 0004). If crypto/rand fails (unrecoverable on a
+// healthy system) it falls back to a time-based identifier so we never
+// panic in a user's hot path.
+func NewMessageID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		now := time.Now().UnixNano()
+		return "ts-" + hex.EncodeToString([]byte{
+			byte(now >> 56), byte(now >> 48), byte(now >> 40), byte(now >> 32),
+			byte(now >> 24), byte(now >> 16), byte(now >> 8), byte(now),
+		})
+	}
+	return hex.EncodeToString(b[:])
 }
