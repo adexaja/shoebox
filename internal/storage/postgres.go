@@ -94,10 +94,10 @@ func (p *Postgres) Enqueue(ctx context.Context, queue string, msg Message) error
 	}
 
 	_, err = p.pool.Exec(ctx, `INSERT INTO shoebox_messages
-		(id, queue, payload, attempts, max_retries, created_at, scheduled_at, metadata, error, dead_at, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending')`,
+		(id, queue, payload, attempts, max_retries, created_at, scheduled_at, priority, metadata, error, dead_at, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending')`,
 		msg.ID, queue, payload, msg.Attempts, msg.MaxRetries,
-		msg.CreatedAt, msg.ScheduledAt, meta, msg.Error, deadAt,
+		msg.CreatedAt, msg.ScheduledAt, msg.Priority, meta, msg.Error, deadAt,
 	)
 	if err != nil {
 		return fmt.Errorf("shoebox/postgres: enqueue: %w", err)
@@ -117,10 +117,10 @@ func (p *Postgres) Dequeue(ctx context.Context, queue string, limit int) ([]Mess
 	defer tx.Rollback(ctx)
 
 	rows, err := tx.Query(ctx,
-		`SELECT id, payload, attempts, max_retries, created_at, scheduled_at, metadata, error, dead_at
+		`SELECT id, payload, attempts, max_retries, created_at, scheduled_at, metadata, error, dead_at, priority
 		 FROM shoebox_messages
 		 WHERE queue = $1 AND status = 'pending' AND scheduled_at <= now()
-		 ORDER BY created_at ASC
+		 ORDER BY priority DESC, created_at ASC
 		 LIMIT $2
 		 FOR UPDATE SKIP LOCKED`,
 		queue, limit)
@@ -240,7 +240,7 @@ func (p *Postgres) Dead(ctx context.Context, queue, msgID string, deadErr error)
 // List returns up to `limit` dead messages from a queue (DLQ inspection).
 func (p *Postgres) List(ctx context.Context, queue string, limit int) ([]Message, error) {
 	rows, err := p.pool.Query(ctx,
-		`SELECT id, payload, attempts, max_retries, created_at, scheduled_at, metadata, error, dead_at
+		`SELECT id, payload, attempts, max_retries, created_at, scheduled_at, metadata, error, dead_at, priority
 		 FROM shoebox_messages
 		 WHERE queue = $1 AND status = 'dead'
 		 ORDER BY dead_at DESC
@@ -332,6 +332,7 @@ func scanPostgresMessage(rows pgx.Rows) (Message, error) {
 	if err := rows.Scan(
 		&m.ID, &m.Payload, &m.Attempts, &m.MaxRetries,
 		&m.CreatedAt, &m.ScheduledAt, &metaBytes, &m.Error, &deadAt.val,
+		&m.Priority,
 	); err != nil {
 		return m, err
 	}

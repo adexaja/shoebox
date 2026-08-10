@@ -33,13 +33,24 @@ func newTestPostgres(t *testing.T) *Postgres {
 	if err != nil {
 		t.Fatalf("NewPostgres: %v", err)
 	}
-	// Clean tables between tests.
+	// Clean tables between tests. DROP + re-open so schema changes (e.g.
+	// adding the priority column) are picked up — NewPostgres uses
+	// CREATE TABLE IF NOT EXISTS, which won't add columns to an existing
+	// table.
 	ctx := context.Background()
-	if _, err := s.pool.Exec(ctx, `DELETE FROM shoebox_messages`); err != nil {
-		t.Fatalf("clean messages: %v", err)
+	if _, err := s.pool.Exec(ctx, `DROP TABLE IF EXISTS shoebox_messages`); err != nil {
+		s.Close()
+		t.Fatalf("drop messages: %v", err)
 	}
-	if _, err := s.pool.Exec(ctx, `DELETE FROM shoebox_stats`); err != nil {
-		t.Fatalf("clean stats: %v", err)
+	if _, err := s.pool.Exec(ctx, `DROP TABLE IF EXISTS shoebox_stats`); err != nil {
+		s.Close()
+		t.Fatalf("drop stats: %v", err)
+	}
+	s.Close()
+
+	s, err = NewPostgres(ctx, testDSN)
+	if err != nil {
+		t.Fatalf("NewPostgres (re-open): %v", err)
 	}
 	t.Cleanup(func() { s.Close() })
 	return s

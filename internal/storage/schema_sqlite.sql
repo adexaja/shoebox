@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS shoebox_messages (
     max_retries  INTEGER DEFAULT 5,
     created_at   TEXT NOT NULL,
     scheduled_at TEXT NOT NULL,
+    priority     INTEGER DEFAULT 0,
     metadata     TEXT DEFAULT '{}',
     error        TEXT DEFAULT '',
     dead_at      TEXT DEFAULT '',

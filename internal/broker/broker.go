@@ -156,6 +156,7 @@ func (b *Broker) Enqueue(ctx context.Context, queue string, payload []byte, opts
 		MaxRetries:  0, // filled in by dispatcher; not used at enqueue time
 		CreatedAt:   now,
 		ScheduledAt: scheduled,
+		Priority:    opts.Priority,
 		Metadata:    opts.Metadata,
 	}
 	if err := b.store.Enqueue(ctx, queue, msg); err != nil {
@@ -178,6 +179,7 @@ func (b *Broker) Enqueue(ctx context.Context, queue string, payload []byte, opts
 type EnqueueOpts struct {
 	Delay    time.Duration
 	Schedule time.Time
+	Priority int
 	Metadata map[string]string
 }
 

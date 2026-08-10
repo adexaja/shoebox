@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 )
@@ -67,6 +68,18 @@ func (m *Memory) Dequeue(_ context.Context, queue string, limit int) ([]Message,
 	}
 
 	now := time.Now()
+
+	// Sort pending by (priority DESC, created_at ASC) so the scan picks
+	// the highest-priority due message first. This is critical for
+	// concurrency=1 (limit=1): without it the scan grabs the first due
+	// message in insertion order, ignoring priority entirely.
+	sort.SliceStable(pending, func(i, j int) bool {
+		if pending[i].Priority != pending[j].Priority {
+			return pending[i].Priority > pending[j].Priority
+		}
+		return pending[i].CreatedAt.Before(pending[j].CreatedAt)
+	})
+
 	out := make([]Message, 0, limit)
 	kept := pending[:0]
 

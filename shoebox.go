@@ -115,6 +115,7 @@ func (q *Queue) Enqueue(queue string, payload []byte, opts ...EnqueueOpt) error 
 	return q.b.Enqueue(context.Background(), queue, payload, broker.EnqueueOpts{
 		Delay:    eo.Delay,
 		Schedule: eo.Schedule,
+		Priority: int(eo.Priority),
 		Metadata: eo.Metadata,
 	})
 }

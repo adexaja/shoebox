@@ -27,6 +27,11 @@ type Message struct {
 	ScheduledAt time.Time
 	Metadata    map[string]string
 
+	// Priority is the delivery hint. Higher values are dequeued first
+	// (priority DESC) within the same due window; ties break by
+	// created_at ASC. Zero (the default) is the lowest priority.
+	Priority int
+
 	// Error is set when the message is moved to the dead-letter queue; it
 	// holds the last handler error. Empty for live messages.
 	Error string

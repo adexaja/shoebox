@@ -81,11 +81,12 @@ func (s *SQLite) Enqueue(ctx context.Context, queue string, msg Message) error {
 		payload = []byte{}
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO shoebox_messages
-		(id, queue, payload, attempts, max_retries, created_at, scheduled_at, metadata, error, dead_at, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+		(id, queue, payload, attempts, max_retries, created_at, scheduled_at, priority, metadata, error, dead_at, status)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
 		msg.ID, queue, payload, msg.Attempts, msg.MaxRetries,
 		msg.CreatedAt.Format(time.RFC3339Nano),
 		msg.ScheduledAt.Format(time.RFC3339Nano),
+		msg.Priority,
 		string(meta), msg.Error, tsOrEmpty(msg.DeadAt),
 	)
 	if err != nil {
@@ -107,10 +108,10 @@ func (s *SQLite) Dequeue(ctx context.Context, queue string, limit int) ([]Messag
 	now := time.Now().Format(time.RFC3339Nano)
 
 	rows, err := tx.QueryContext(ctx,
-		`SELECT id, payload, attempts, max_retries, created_at, scheduled_at, metadata, error, dead_at
+		`SELECT id, payload, attempts, max_retries, created_at, scheduled_at, metadata, error, dead_at, priority
 		 FROM shoebox_messages
 		 WHERE queue = ? AND status = 'pending' AND scheduled_at <= ?
-		 ORDER BY created_at ASC
+		 ORDER BY priority DESC, created_at ASC
 		 LIMIT ?`,
 		queue, now, limit)
 	if err != nil {
@@ -235,7 +236,7 @@ func (s *SQLite) Dead(ctx context.Context, queue, msgID string, deadErr error) e
 // The queue name should be the shadow queue name (e.g. "orders.dlq").
 func (s *SQLite) List(ctx context.Context, queue string, limit int) ([]Message, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, payload, attempts, max_retries, created_at, scheduled_at, metadata, error, dead_at
+		`SELECT id, payload, attempts, max_retries, created_at, scheduled_at, metadata, error, dead_at, priority
 		 FROM shoebox_messages
 		 WHERE queue = ? AND status = 'dead'
 		 ORDER BY dead_at DESC
@@ -329,6 +330,7 @@ func scanMessage(rs interface {
 	if err := rs.Scan(
 		&m.ID, &m.Payload, &m.Attempts, &m.MaxRetries,
 		&createdAt, &scheduledAt, &metaStr, &errStr, &deadAtStr,
+		&m.Priority,
 	); err != nil {
 		return m, err
 	}

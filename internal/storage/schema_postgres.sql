@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS shoebox_messages (
     max_retries  INTEGER NOT NULL DEFAULT 5,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     scheduled_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    priority     INTEGER NOT NULL DEFAULT 0,
     metadata     JSONB NOT NULL DEFAULT '{}',
     error        TEXT NOT NULL DEFAULT '',
     dead_at      TIMESTAMPTZ,
