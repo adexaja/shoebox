@@ -66,6 +66,10 @@ type enqueueResponse struct {
 	ID string `json:"id"`
 }
 
+// maxPayloadSize caps the request body on enqueue to prevent memory
+// exhaustion from oversized payloads. 1 MB is generous for a single message.
+const maxPayloadSize = 1 << 20 // 1 MB
+
 // enqueue handles POST /queues/{name}/messages.
 func (h *Handler) enqueue(w http.ResponseWriter, r *http.Request) {
 	queue := r.PathValue("name")
@@ -73,6 +77,9 @@ func (h *Handler) enqueue(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing queue name")
 		return
 	}
+
+	// Limit body size to prevent memory exhaustion attacks.
+	r.Body = http.MaxBytesReader(w, r.Body, maxPayloadSize)
 
 	var req enqueueRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

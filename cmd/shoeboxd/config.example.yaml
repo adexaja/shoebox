@@ -7,7 +7,9 @@
 
 server:
   addr: ":8080"
-  auth_token: ""           # leave empty to disable auth
+  auth_token: ""           # API token (X-API-Key / Bearer); leave empty to disable API auth
+  dashboard_user: "admin"  # Basic Auth username for the web dashboard; leave empty to disable
+  dashboard_password: ""   # Basic Auth password for the web dashboard
 
 storage:
   kind: memory             # memory | sqlite | postgres
@@ -22,5 +24,6 @@ webhooks:
     url: "https://hooks.example.com/orders"
     timeout: 10s                       # per-request HTTP timeout
     content_type: "application/json"   # Content-Type header on POST
+    secret: "whsec-..."                # HMAC-SHA256 key; X-Shoebox-Signature header (empty = unsigned)
   # emails:
   #   url: "https://hooks.example.com/emails"

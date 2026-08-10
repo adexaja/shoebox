@@ -108,10 +108,14 @@ func main() {
 		if wh.ContentType != "" {
 			whOpts = append(whOpts, shoebox.WithWebhookContentType(wh.ContentType))
 		}
+		if wh.Secret != "" {
+			whOpts = append(whOpts, shoebox.WithWebhookSecret(wh.Secret))
+		}
 		q.Handle(queue, shoebox.WebhookHandler(wh.URL, nil, whOpts...))
 		logger.Info("webhook registered",
 			slog.String("queue", queue),
 			slog.String("url", wh.URL),
+			slog.Bool("signed", wh.Secret != ""),
 		)
 	}
 
@@ -122,9 +126,19 @@ func main() {
 	// --- wire HTTP routes ---
 	mux := http.NewServeMux()
 
-	// Dashboard (HTML) at root.
-	dash.Register(mux)
-	mux.HandleFunc("GET /api/stats.json", dash.JSONHandler)
+	// Dashboard (HTML) at root — protected by Basic Auth so a human can
+	// log in via the browser's native password prompt. Uses a separate
+	// credential from the API token (dashboard_user / dashboard_password).
+	dashMux := http.NewServeMux()
+	dash.Register(dashMux)
+	dashMux.HandleFunc("GET /api/stats.json", dash.JSONHandler)
+	dashMiddleware := api.Chain(
+		api.RecoveryMiddleware(logger),
+		api.RequestIDMiddleware(),
+		api.LoggingMiddleware(logger),
+		api.BasicAuthMiddleware(cfg.Server.DashboardUser, cfg.Server.DashboardPassword),
+	)
+	mux.Handle("/", dashMiddleware(dashMux))
 
 	// API endpoints under /api.
 	apiMux := http.NewServeMux()

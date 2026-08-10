@@ -3,6 +3,9 @@ package shoebox
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,6 +29,7 @@ type WebhookOption func(*webhookConfig)
 type webhookConfig struct {
 	timeout     time.Duration
 	contentType string
+	secret      string // HMAC signing key (empty = no signature)
 }
 
 // WithWebhookTimeout sets the per-request timeout used by the default HTTP
@@ -40,6 +44,19 @@ func WithWebhookTimeout(d time.Duration) WebhookOption {
 // to "application/json" (most shoebox payloads are JSON).
 func WithWebhookContentType(ct string) WebhookOption {
 	return func(c *webhookConfig) { c.contentType = ct }
+}
+
+// WithWebhookSecret sets an HMAC-SHA256 shared secret. When non-empty, every
+// POST includes an X-Shoebox-Signature header containing the hex-encoded
+// HMAC of the payload body. The receiver should verify this before trusting
+// the delivery:
+//
+//	mac := hmac.New(sha256.New, []byte(secret))
+//	mac.Write(body)
+//	expected := hex.EncodeToString(mac.Sum(nil))
+//	if !hmac.Equal([]byte(sig), []byte(expected)) { /* reject */ }
+func WithWebhookSecret(secret string) WebhookOption {
+	return func(c *webhookConfig) { c.secret = secret }
 }
 
 // webhookHandler delivers messages by POSTing their payload to a target URL.
@@ -57,9 +74,10 @@ type webhookHandler struct {
 //	X-Shoebox-Message-ID   the message ID (matches the API's DELETE path)
 //	X-Shoebox-Queue        the source queue name
 //	X-Shoebox-Attempt      attempt number (1 = first delivery)
+//	X-Shoebox-Signature    HMAC-SHA256 of the payload (only if a secret is set)
 //
 // client is used for all requests; if nil, a default client with a
-// 10-second timeout is used.
+// 10-second timeout and redirect-following disabled (SSRF protection) is used.
 func WebhookHandler(target string, client *http.Client, opts ...WebhookOption) HandlerFunc {
 	cfg := webhookConfig{
 		timeout:     10 * time.Second,
@@ -69,7 +87,7 @@ func WebhookHandler(target string, client *http.Client, opts ...WebhookOption) H
 		o(&cfg)
 	}
 	if client == nil {
-		client = &http.Client{Timeout: cfg.timeout}
+		client = newWebhookClient(cfg.timeout)
 	}
 
 	h := &webhookHandler{
@@ -80,6 +98,19 @@ func WebhookHandler(target string, client *http.Client, opts ...WebhookOption) H
 
 	return func(ctx context.Context, m Message) error {
 		return h.deliver(ctx, m)
+	}
+}
+
+// newWebhookClient creates an HTTP client that does NOT follow redirects.
+// This prevents SSRF: a malicious or compromised webhook target could
+// redirect the POST to an internal service, leaking the payload. The
+// caller gets the raw 3xx response and we treat it as a non-2xx failure.
+func newWebhookClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
 }
 
@@ -95,6 +126,13 @@ func (h *webhookHandler) deliver(ctx context.Context, m Message) error {
 	req.Header.Set("X-Shoebox-Message-ID", m.ID)
 	req.Header.Set("X-Shoebox-Queue", m.Queue)
 	req.Header.Set("X-Shoebox-Attempt", strconv.Itoa(m.Attempts+1))
+
+	// HMAC signature so the receiver can authenticate the sender.
+	if h.config.secret != "" {
+		mac := hmac.New(sha256.New, []byte(h.config.secret))
+		mac.Write(m.Payload)
+		req.Header.Set("X-Shoebox-Signature", hex.EncodeToString(mac.Sum(nil)))
+	}
 
 	resp, err := h.client.Do(req)
 	if err != nil {

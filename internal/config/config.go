@@ -40,8 +40,10 @@ type Config struct {
 
 // ServerConfig holds HTTP server settings.
 type ServerConfig struct {
-	Addr      string `yaml:"addr"`
-	AuthToken string `yaml:"auth_token"`
+	Addr              string `yaml:"addr"`
+	AuthToken         string `yaml:"auth_token"`          // API token (X-API-Key / Bearer)
+	DashboardUser     string `yaml:"dashboard_user"`      // Basic Auth username for dashboard
+	DashboardPassword string `yaml:"dashboard_password"`  // Basic Auth password for dashboard
 }
 
 // StorageConfig selects and configures the storage backend.
@@ -56,6 +58,7 @@ type WebhookConfig struct {
 	URL         string        `yaml:"url"`
 	Timeout     time.Duration `yaml:"timeout"`
 	ContentType string        `yaml:"content_type"`
+	Secret      string        `yaml:"secret"` // HMAC-SHA256 signing key (empty = unsigned)
 }
 
 // defaults applies sensible defaults to an empty config.

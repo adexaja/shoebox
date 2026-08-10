@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"log/slog"
 	"net/http"
@@ -88,7 +89,33 @@ func AuthMiddleware(token string) Middleware {
 					provided = auth[7:]
 				}
 			}
-			if provided != token {
+			if subtle.ConstantTimeCompare([]byte(provided), []byte(token)) != 1 {
+				writeError(w, http.StatusUnauthorized, "unauthorized")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// BasicAuthMiddleware protects a route with HTTP Basic Authentication. This
+// is intended for human-facing routes (the dashboard) where a browser-native
+// password prompt is more ergonomic than manually setting a token header.
+// The password is compared in constant time to prevent timing attacks.
+//
+// If username is empty the middleware is a pass-through (no auth), allowing
+// shoeboxd to run without dashboard auth in development.
+func BasicAuthMiddleware(username, password string) Middleware {
+	if username == "" {
+		return func(next http.Handler) http.Handler { return next }
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			u, p, ok := r.BasicAuth()
+			if !ok ||
+				subtle.ConstantTimeCompare([]byte(u), []byte(username)) != 1 ||
+				subtle.ConstantTimeCompare([]byte(p), []byte(password)) != 1 {
+				w.Header().Set("WWW-Authenticate", `Basic realm="shoebox", charset="UTF-8"`)
 				writeError(w, http.StatusUnauthorized, "unauthorized")
 				return
 			}
