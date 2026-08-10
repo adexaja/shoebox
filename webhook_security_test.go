@@ -159,7 +159,7 @@ func TestWebhookHandler_SignatureVariesByPayload(t *testing.T) {
 
 // TestNewWebhookClient_NoRedirects tests the client directly.
 func TestNewWebhookClient_NoRedirects(t *testing.T) {
-	client := newWebhookClient(5 * time.Second)
+	client := newWebhookClient(5*time.Second, 16)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/redirect" {

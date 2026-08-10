@@ -1,0 +1,12 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/adexaja/shoebox/internal/storage
+cpu: Apple M2
+BenchmarkMemoryEnqueue-8               	 3593955	       394.0 ns/op	    1108 B/op	       1 allocs/op
+BenchmarkMemoryDequeue_SteadyState-8   	   84652	     14353 ns/op	     472 B/op	       6 allocs/op
+BenchmarkMemoryDequeue_Batch-8         	--- FAIL: BenchmarkMemoryDequeue_Batch-8
+    memory_bench_test.go:76: shoebox/storage: queue empty
+FAIL
+exit status 1
+FAIL	github.com/adexaja/shoebox/internal/storage	3.581s
+FAIL

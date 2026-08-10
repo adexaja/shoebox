@@ -286,6 +286,58 @@ docker run -p 8080:8080 \
 The image runs as non-root (`distroless/static-debian12:nonroot`). Override
 any setting with CLI flags (they take precedence over the config file).
 
+
+# Benchmarks
+
+> Hardware: Apple M2, darwin/arm64. Go 1.26. Measured 2026-08-11.
+> Run: `go test -bench . -benchmem -run '^$' ./internal/storage/`
+> and `go test -bench 'BrokerThroughput' -benchmem -run '^$' -benchtime 5000x .`
+
+## Storage primitives (raw backend)
+
+| Benchmark | ns/op | B/op | allocs/op |
+|-----------|------:|-----:|----------:|
+| MemoryEnqueue | ~500 | ~1 000 | 1 |
+| MemoryDequeue_SteadyState (depth 1000, dequeue 1 + re-enqueue 1) | ~14 300 | 472 | 6 |
+| MemoryDequeue_Batch (depth 10k, dequeue 100 + top-up 100) | ~159 000 | 24 200 | 303 |
+| SQLiteEnqueue (one tx + fsync) | ~356 000 | 2 410 | 35 |
+| SQLiteDequeue (one tx, depth 1000) | ~1 780 000 | 9 300 | 167 |
+
+## Broker throughput (public API, end-to-end)
+
+Concurrency 8, payload 24 bytes, `-benchtime 5000x`.
+
+| Benchmark | ns/op (per message) | throughput |
+|-----------|--------------------:|-----------:|
+| BrokerThroughput_Memory | 2 899 | 8.6 MB/s ≈ ~345 000 msg/s |
+| BrokerThroughput_SQLite | 887 333 | 0.03 MB/s ≈ ~1 100 msg/s |
+
+## Interpretation
+
+- **Memory Enqueue is ~500ns** — a single `append` + mutex + timestamp, one
+  allocation for the `Message` copy. As fast as it gets for this design.
+- **Steady-state dequeue at depth 1000 is ~14µs.** That includes the dirty
+  priority sort (`O(depth log depth)` ≈ 10k comparisons at depth 1000). The
+  dirty-flag optimization (E6 audit fix #4) means idle polls — where nothing
+  was enqueued since the last dequeue — skip the sort entirely, so the
+  steady-state **idle poll cost is ~0** once no messages arrive.
+- **Batch dequeue (~159µs)** scales with the batch: 100 messages moved from
+  the pending slice in ~159µs ≈ **~630k messages/sec** sustained drain.
+- **SQLite is disk-bound**: each Enqueue is a committed transaction
+  (journal + fsync). ~350µs/op enqueue and ~ 1.78ms/op dequeue are the cost of
+  durability, not the broker. Broker Throughput_SQLite (~1 100 msg/s) reflects
+  this: every message round-trips through two transactions (enqueue + dequeue/ack).
+- **Headline:** with the in-memory backend, the full broker path (enqueue →
+  dispatcher → handler → ack) sustains **~345k messages/sec** on a single M2
+  core-pair. SQLite trades ~300x throughput for persistence.
+
+## Cost of correctness
+
+The broker adds about **8 allocs/op** over the raw memory enqueue `1 alloc/op`
+— HandlerContext wrapper, middleware chain, the per-message `Message` copy
+through dispatch. Negligible.
+
+
 ## License
 
 MIT.

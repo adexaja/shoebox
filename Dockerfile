@@ -39,5 +39,12 @@ EXPOSE 8080
 
 USER nonroot:nonroot
 
+# Go runtime GC tuning: without a heap cap, a message spike can push GC
+# chase an unbounded heap and get OOM-killed against the container limit.
+# GOMEMLIMIT is a soft cap — the GC targets it but stays correct beyond it.
+# Set it to ~80-90% of the container's memory limit. Override per-deploy:
+#   docker run -e GOMEMLIMIT=1GiB ...
+ENV GOMEMLIMIT=512MiB
+
 ENTRYPOINT ["/app/shoeboxd"]
 CMD ["--addr=:8080", "--storage=memory"]

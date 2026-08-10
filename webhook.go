@@ -27,9 +27,10 @@ type WebhookOption func(*webhookConfig)
 
 // webhookConfig holds the tunables for a WebhookHandler.
 type webhookConfig struct {
-	timeout     time.Duration
-	contentType string
-	secret      string // HMAC signing key (empty = no signature)
+	timeout      time.Duration
+	contentType  string
+	secret       string // HMAC signing key (empty = no signature)
+	maxIdleConns int    // idle keep-alive conns kept warm to the webhook target
 }
 
 // WithWebhookTimeout sets the per-request timeout used by the default HTTP
@@ -59,6 +60,16 @@ func WithWebhookSecret(secret string) WebhookOption {
 	return func(c *webhookConfig) { c.secret = secret }
 }
 
+// WithWebhookMaxIdleConns sets the number of keep-alive connections kept warm
+// to the webhook target. http.Client with a nil Transport defaults to 2 idle
+// connections per host, so handler workers beyond the second pay a fresh
+// TCP+TLS handshake on every delivery. Size this to the broker's
+// Concurrency — concurrency workers can share maxIdle warm connections.
+// Defaults to 16.
+func WithWebhookMaxIdleConns(n int) WebhookOption {
+	return func(c *webhookConfig) { c.maxIdleConns = n }
+}
+
 // webhookHandler delivers messages by POSTing their payload to a target URL.
 type webhookHandler struct {
 	target string
@@ -80,14 +91,15 @@ type webhookHandler struct {
 // 10-second timeout and redirect-following disabled (SSRF protection) is used.
 func WebhookHandler(target string, client *http.Client, opts ...WebhookOption) HandlerFunc {
 	cfg := webhookConfig{
-		timeout:     10 * time.Second,
-		contentType: "application/json",
+		timeout:      10 * time.Second,
+		contentType:  "application/json",
+		maxIdleConns: 16,
 	}
 	for _, o := range opts {
 		o(&cfg)
 	}
 	if client == nil {
-		client = newWebhookClient(cfg.timeout)
+		client = newWebhookClient(cfg.timeout, cfg.maxIdleConns)
 	}
 
 	h := &webhookHandler{
@@ -105,9 +117,21 @@ func WebhookHandler(target string, client *http.Client, opts ...WebhookOption) H
 // This prevents SSRF: a malicious or compromised webhook target could
 // redirect the POST to an internal service, leaking the payload. The
 // caller gets the raw 3xx response and we treat it as a non-2xx failure.
-func newWebhookClient(timeout time.Duration) *http.Client {
+//
+// The Transport is cloned from http.DefaultTransport with MaxIdleConnsPerHost
+// raised from the package default of 2 so handler workers beyond the second
+// reuse warm connections instead of paying a TCP+TLS handshake per delivery.
+// maxIdle is the number of keep-alive connections to keep open to the target.
+func newWebhookClient(timeout time.Duration, maxIdle int) *http.Client {
+	if maxIdle <= 0 {
+		maxIdle = 16
+	}
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.MaxIdleConnsPerHost = maxIdle
+	tr.MaxIdleConns = maxIdle
 	return &http.Client{
-		Timeout: timeout,
+		Timeout:   timeout,
+		Transport: tr,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
