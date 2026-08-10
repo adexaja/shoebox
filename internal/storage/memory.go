@@ -97,7 +97,17 @@ func (m *Memory) Ack(_ context.Context, queue, msgID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.statsFor(queue).Processed++
-	_ = msgID
+	// Remove the message from the queue if it is still in the pending slice.
+	// For normally dispatched messages this is a no-op (Dequeue already
+	// removed it), but for DLQ entries (enqueued but never dequeued) Ack
+	// is how Replay removes them from the shadow queue.
+	pending := m.queues[queue]
+	for i, msg := range pending {
+		if msg.ID == msgID {
+			m.queues[queue] = append(pending[:i], pending[i+1:]...)
+			break
+		}
+	}
 	return nil
 }
 
@@ -132,6 +142,30 @@ func (m *Memory) Stats(_ context.Context, queue string) (QueueStats, error) {
 	s.Depth = len(m.queues[queue])
 	return s, nil
 }
+
+// List returns up to `limit` messages from a queue without removing them.
+// For DLQ inspection: the broker writes dead messages to {queue}.dlq, and
+// callers use List to browse them. The messages are returned in FIFO order.
+func (m *Memory) List(_ context.Context, queue string, limit int) ([]Message, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pending := m.queues[queue]
+	if len(pending) == 0 {
+		return nil, ErrEmpty
+	}
+	if limit > len(pending) {
+		limit = len(pending)
+	}
+	out := make([]Message, limit)
+	copy(out, pending[:limit])
+	return out, nil
+}
+
+// Reclaim transitions stale in-flight messages back to pending. For Memory
+// this is a no-op: messages are removed from the pending slice on Dequeue
+// (not kept in a separate in-flight set), so if the process dies they are
+// simply gone. Persistent backends use Reclaim for crash recovery.
+func (m *Memory) Reclaim(_ context.Context, _ string) error { return nil }
 
 // Close is a no-op for Memory; included for interface compliance.
 func (m *Memory) Close() error { return nil }

@@ -19,9 +19,10 @@ type Queue struct {
 	b *broker.Broker
 }
 
-// New constructs a Queue backed by the storage kind selected in opts. For
-// Week 1 only Memory is implemented; selecting SQLite or Postgres returns
-// nil with an error.
+// New constructs a Queue backed by the storage kind selected in opts.
+//
+// Memory is in-process and volatile. SQLite persists to opts.Path and
+// survives restarts. Postgres is not yet implemented.
 func New(opts Options) (*Queue, error) {
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = 4
@@ -30,7 +31,7 @@ func New(opts Options) (*Queue, error) {
 		opts.Logger = slog.Default()
 	}
 
-	store, err := buildStorage(opts)
+	store, err := buildStorage(context.Background(), opts)
 	if err != nil {
 		return nil, err
 	}
@@ -45,14 +46,17 @@ func New(opts Options) (*Queue, error) {
 }
 
 // buildStorage returns the Storage implementation for the requested kind.
-func buildStorage(opts Options) (storage.Storage, error) {
+func buildStorage(ctx context.Context, opts Options) (storage.Storage, error) {
 	switch opts.Storage {
 	case Memory:
 		return storage.NewMemory(), nil
 	case SQLite:
-		return nil, fmt.Errorf("shoebox: SQLite storage is a Week 2 deliverable (see docs/tasks.md E2)")
+		if opts.Path == "" {
+			return nil, fmt.Errorf("shoebox: SQLite storage requires Options.Path")
+		}
+		return storage.NewSQLite(ctx, opts.Path)
 	case Postgres:
-		return nil, fmt.Errorf("shoebox: Postgres storage is a Week 2 deliverable (see docs/tasks.md E2)")
+		return nil, fmt.Errorf("shoebox: Postgres storage is not yet implemented (see docs/tasks/E2-persistence.md)")
 	default:
 		return nil, fmt.Errorf("shoebox: unknown storage kind %d", opts.Storage)
 	}

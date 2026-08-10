@@ -310,7 +310,7 @@ func (b *Broker) handleOne(queue string, msg storage.Message) {
 
 	// Cap attempts at the handler's MaxRetries.
 	if h.opts.MaxRetries > 0 && msg.Attempts > h.opts.MaxRetries {
-		b.toDeadLetter(queue, msg)
+		b.toDeadLetter(queue, msg, errors.New("max retries exceeded"))
 		return
 	}
 
@@ -333,7 +333,7 @@ func (b *Broker) handleOne(queue string, msg storage.Message) {
 
 	msg.Attempts++
 	if msg.Attempts > h.opts.MaxRetries {
-		b.toDeadLetter(queue, msg)
+		b.toDeadLetter(queue, msg, err)
 		return
 	}
 
@@ -357,16 +357,21 @@ func (b *Broker) handlerCtx(h *handler) (context.Context, context.CancelFunc) {
 }
 
 // toDeadLetter writes the message to the {queue}.dlq shadow queue and
-// bumps the dead counter. The DLQ is a plain queue as far as the
-// storage layer is concerned; inspection/replay APIs come in Week 4.
-func (b *Broker) toDeadLetter(queue string, msg storage.Message) {
+// bumps the dead counter. The dead message retains its original payload,
+// the last handler error, the retry count, and a timestamp (E2-S3).
+func (b *Broker) toDeadLetter(queue string, msg storage.Message, handlerErr error) {
 	dlq := queue + ".dlq"
+	msg.Queue = dlq
 	msg.ScheduledAt = time.Now()
+	msg.DeadAt = time.Now()
+	if handlerErr != nil {
+		msg.Error = handlerErr.Error()
+	}
 	if err := b.store.Enqueue(b.storeCtx(), dlq, msg); err != nil {
 		b.logger.ErrorContext(b.storeCtx(), "shoebox: dlq enqueue failed",
 			slog.String("queue", queue), slog.String("id", msg.ID), slog.Any("err", err))
 	}
-	_ = b.store.Dead(b.storeCtx(), queue, msg.ID, errors.New("max retries exceeded"))
+	_ = b.store.Dead(b.storeCtx(), queue, msg.ID, handlerErr)
 }
 
 // Shutdown drains the queues and stops the dispatchers.

@@ -24,6 +24,14 @@ type Message struct {
 	CreatedAt   time.Time
 	ScheduledAt time.Time
 	Metadata    map[string]string
+
+	// Error is set when the message is moved to the dead-letter queue; it
+	// holds the last handler error. Empty for live messages.
+	Error string
+
+	// DeadAt is set when the message is moved to the dead-letter queue; it
+	// records the time of dead-lettering. Zero for live messages.
+	DeadAt time.Time
 }
 
 // QueueStats is the storage-layer view of queue statistics.
@@ -43,12 +51,14 @@ var ErrEmpty = errors.New("shoebox/storage: queue empty")
 // small: the broker is the only caller.
 //
 // Enqueue persists a new message. Dequeue returns up to `limit` messages
-// that are due (ScheduledAt <= now), removing them from the pending set.
-// Ack confirms successful processing. Nack records a failed delivery
-// (the broker re-enqueues with a future ScheduledAt for backoff).
-// Dead records that a message has exhausted its retries; the broker has
-// already moved the message to the {queue}.dlq shadow queue, this is
-// just the stat bump.
+// that are due (ScheduledAt <= now), atomically transitioning them to an
+// in-flight state (SQLite/Postgres: status='processing'; Memory: removed
+// from the pending slice). Ack confirms successful processing and removes
+// the message. Nack records a failed delivery (the broker re-enqueues with
+// a future ScheduledAt for backoff). Dead marks the message as dead and
+// records the last error. List returns dead messages from a queue (DLQ
+// inspection). Reclaim transitions stale in-flight messages back to pending
+// (crash recovery; called once during open of a persistent backend).
 type Storage interface {
 	Enqueue(ctx context.Context, queue string, m Message) error
 	Dequeue(ctx context.Context, queue string, limit int) ([]Message, error)
@@ -56,5 +66,7 @@ type Storage interface {
 	Nack(ctx context.Context, queue string, msgID string, err error) error
 	Dead(ctx context.Context, queue string, msgID string, err error) error
 	Stats(ctx context.Context, queue string) (QueueStats, error)
+	List(ctx context.Context, queue string, limit int) ([]Message, error)
+	Reclaim(ctx context.Context, queue string) error
 	Close() error
 }
