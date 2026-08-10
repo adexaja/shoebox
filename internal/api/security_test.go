@@ -69,7 +69,100 @@ func TestAuthMiddleware_ConstantTime(t *testing.T) {
 	}
 }
 
-// TestEnqueue_BodySizeLimit verifies that an oversized payload is rejected.
+// TestBasicAuthMiddleware verifies HTTP Basic Auth for the dashboard:
+// correct credentials pass, wrong/missing credentials get 401 with a
+// WWW-Authenticate challenge header so the browser shows a login prompt.
+func TestBasicAuthMiddleware(t *testing.T) {
+	user := "admin"
+	pass := "s3cret-dashboard"
+	mw := BasicAuthMiddleware(user, pass)
+
+	tests := []struct {
+		name     string
+		user     string
+		pass     string
+		setBasic bool
+		wantAuth bool
+	}{
+		{"correct credentials", user, pass, true, true},
+		{"wrong password", user, "wrong", true, false},
+		{"wrong username", "other", pass, true, false},
+		{"no auth header", "", "", false, false},
+		{"empty password", user, "", true, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			called := false
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				w.WriteHeader(http.StatusOK)
+			})
+
+			srv := httptest.NewServer(mw(next))
+			defer srv.Close()
+
+			req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+			if tt.setBasic {
+				req.SetBasicAuth(tt.user, tt.pass)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+
+			if tt.wantAuth {
+				if resp.StatusCode != http.StatusOK {
+					t.Fatalf("status = %d, want 200", resp.StatusCode)
+				}
+				if !called {
+					t.Fatal("handler should have been called")
+				}
+			} else {
+				if resp.StatusCode != http.StatusUnauthorized {
+					t.Fatalf("status = %d, want 401", resp.StatusCode)
+				}
+				if called {
+					t.Fatal("handler should NOT have been called")
+				}
+				// Browser needs WWW-Authenticate to show the login prompt.
+				if resp.Header.Get("WWW-Authenticate") == "" {
+					t.Fatal("expected WWW-Authenticate header on 401")
+				}
+			}
+		})
+	}
+}
+
+// TestBasicAuthMiddleware_EmptyUserPassthrough verifies that when no
+// dashboard_user is configured, the middleware is a pass-through (no auth).
+func TestBasicAuthMiddleware_EmptyUserPassthrough(t *testing.T) {
+	mw := BasicAuthMiddleware("", "")
+	called := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	srv := httptest.NewServer(mw(next))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (passthrough)", resp.StatusCode)
+	}
+	if !called {
+		t.Fatal("handler should be called when auth is disabled")
+	}
+}
+
+
 func TestEnqueue_BodySizeLimit(t *testing.T) {
 	h, _ := newTestHandler(t)
 
