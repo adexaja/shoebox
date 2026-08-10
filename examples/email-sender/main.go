@@ -78,9 +78,12 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	stats, _ := q.Stats(ctx, "emails")
+	// Shutdown drains the queue (waits for in-flight + retrying handlers),
+	// THEN we read stats. Reading before Shutdown shows zeros because
+	// handlers haven't finished yet.
 	_ = q.Shutdown(ctx)
 
+	stats, _ := q.Stats(context.Background(), "emails")
 	fmt.Printf("\n--- results: processed=%d errors=%d retries=%d dead=%d ---\n",
 		stats.Processed, stats.Errors, stats.Retries, stats.Dead)
 }
