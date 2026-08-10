@@ -49,9 +49,11 @@ func TestPriority_DequeueOrder(t *testing.T) {
 		return nil
 	})
 
-	// Enqueue Low, High, Normal (NOT in priority order). All are
-	// immediately due (no Delay), so dequeue order is determined solely by
-	// the priority sort.
+	// Pause so we can enqueue all three before the dispatcher grabs any.
+	// Without this, concurrency=1 could dequeue "low" before "high" is
+	// enqueued — the sort can't order messages that aren't in storage yet.
+	q.Pause("jobs")
+
 	must := func(err error) {
 		t.Helper()
 		if err != nil {
@@ -61,6 +63,10 @@ func TestPriority_DequeueOrder(t *testing.T) {
 	must(q.Enqueue("jobs", []byte("low"), WithPriority(Low)))
 	must(q.Enqueue("jobs", []byte("high"), WithPriority(High)))
 	must(q.Enqueue("jobs", []byte("normal"), WithPriority(Normal)))
+
+	// Resume — now all three are in storage together and the priority sort
+	// determines the dequeue order.
+	q.Resume("jobs")
 
 	// Expect delivery in priority order: High (2), Normal (1), Low (0).
 	want := []string{"high", "normal", "low"}
@@ -89,6 +95,9 @@ func TestPriority_DefaultsToZero(t *testing.T) {
 		return nil
 	})
 
+	// Pause so both messages are in storage before the dispatcher runs.
+	q.Pause("jobs")
+
 	// "default" has no priority option → Low (0).
 	if err := q.Enqueue("jobs", []byte("default")); err != nil {
 		t.Fatalf("Enqueue default: %v", err)
@@ -98,6 +107,8 @@ func TestPriority_DefaultsToZero(t *testing.T) {
 	if err := q.Enqueue("jobs", []byte("boosted"), WithPriority(High)); err != nil {
 		t.Fatalf("Enqueue boosted: %v", err)
 	}
+
+	q.Resume("jobs")
 
 	select {
 	case got := <-order:

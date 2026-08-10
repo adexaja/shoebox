@@ -113,10 +113,11 @@ func (q *Queue) Enqueue(queue string, payload []byte, opts ...EnqueueOpt) error 
 		opt(&eo)
 	}
 	return q.b.Enqueue(context.Background(), queue, payload, broker.EnqueueOpts{
-		Delay:    eo.Delay,
-		Schedule: eo.Schedule,
-		Priority: int(eo.Priority),
-		Metadata: eo.Metadata,
+		Delay:     eo.Delay,
+		Schedule:  eo.Schedule,
+		Priority:  int(eo.Priority),
+		DedupeKey: eo.DedupeKey,
+		Metadata:  eo.Metadata,
 	})
 }
 
@@ -205,4 +206,27 @@ func (q *Queue) UpdateDepthGauges(ctx context.Context) {
 		}
 		q.metrics.Depth.WithLabelValues(queue).Set(float64(stats.Depth))
 	}
+}
+
+// Pause stops the dispatcher from dequeuing messages on the named queue.
+// In-flight handlers continue to run; new messages accumulate in storage
+// until Resume is called. Pause is idempotent.
+func (q *Queue) Pause(queue string) {
+	q.b.Pause(queue)
+}
+
+// Resume allows the dispatcher to start dequeuing messages again on the named
+// queue. Resume is idempotent.
+func (q *Queue) Resume(queue string) {
+	q.b.Resume(queue)
+}
+
+// Drain processes all remaining messages on the named queue to quiescence
+// (empty Dequeue + zero in-flight workers), then stops that queue's
+// dispatcher. It blocks until drain completes or ctx expires.
+//
+// Unlike Shutdown, Drain only affects a single queue — other queues keep
+// running.
+func (q *Queue) Drain(ctx context.Context, queue string) error {
+	return q.b.Drain(ctx, queue)
 }

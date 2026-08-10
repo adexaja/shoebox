@@ -58,6 +58,23 @@ type Broker struct {
 	shutdownCtxMu  sync.RWMutex
 
 	shuttingDown atomic.Bool
+
+	// dedupe suppresses duplicate enqueues within a per-key TTL window
+	// (ADR 0006 §Deduplication).
+	dedupe    *dedupeTable
+	dedupeTTL time.Duration
+
+	// paused holds per-queue atomic flags. When set, the dispatcher skips
+	// dequeuing that queue so messages accumulate until Resume.
+	paused   map[string]*atomic.Bool
+	pausedMu sync.Mutex
+
+	// qDraining holds per-queue drain flags. When set, the dispatcher for
+	// that queue enters per-queue drain mode: process to quiescence, then
+	// stop only that queue (not the whole broker).
+	qDraining   map[string]*atomic.Bool
+	drainDone   map[string]chan struct{}
+	qDrainingMu sync.Mutex
 }
 
 // New constructs a Broker.
@@ -78,6 +95,11 @@ func New(opts Options) *Broker {
 		stopCh:      make(chan struct{}),
 		abortCh:     make(chan struct{}),
 		shutdownCtx: context.Background(),
+		dedupe:      newDedupeTable(),
+		dedupeTTL:   DefaultDedupeTTL,
+		paused:      make(map[string]*atomic.Bool),
+		qDraining:   make(map[string]*atomic.Bool),
+		drainDone:   make(map[string]chan struct{}),
 	}
 }
 
@@ -139,6 +161,14 @@ func (b *Broker) storeCtx() context.Context {
 // including during Shutdown — the broker is designed to drain in-flight
 // work before stopping.
 func (b *Broker) Enqueue(ctx context.Context, queue string, payload []byte, opts EnqueueOpts) error {
+	// Deduplication: if a DedupeKey is set and a matching key is still live
+	// for this queue, silently suppress this enqueue (no error, no store
+	// write). The caller's contract is fire-and-forget, so returning nil is
+	// the right signal — the message was "accepted" even if deduplicated.
+	if opts.DedupeKey != "" && b.dedupe.checkAndAdd(queue, opts.DedupeKey, b.dedupeTTL) {
+		return nil
+	}
+
 	now := time.Now()
 	scheduled := now
 	switch {
@@ -177,10 +207,11 @@ func (b *Broker) Enqueue(ctx context.Context, queue string, payload []byte, opts
 
 // EnqueueOpts is the broker's view of the public EnqueueOptions.
 type EnqueueOpts struct {
-	Delay    time.Duration
-	Schedule time.Time
-	Priority int
-	Metadata map[string]string
+	Delay     time.Duration
+	Schedule  time.Time
+	Priority  int
+	DedupeKey string
+	Metadata  map[string]string
 }
 
 // dispatch is the per-queue worker loop. It runs `concurrency` handlers
@@ -208,6 +239,17 @@ func (b *Broker) dispatch(queue string) {
 		default:
 		}
 
+		// Per-queue pause: skip dequeuing while paused, but keep the loop
+		// alive so Resume can pick it up immediately.
+		if b.isPaused(queue) {
+			select {
+			case <-b.abortCh:
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
+			continue
+		}
+
 		msgs, err := b.store.Dequeue(b.storeCtx(), queue, b.concurrency)
 		if err != nil && !errors.Is(err, storage.ErrEmpty) {
 			b.logger.ErrorContext(b.storeCtx(), "shoebox: dequeue error",
@@ -215,7 +257,7 @@ func (b *Broker) dispatch(queue string) {
 		}
 
 		if len(msgs) == 0 {
-			// Nothing ready right now. Either idle, or draining.
+			// Nothing ready right now. Either idle, draining, or per-queue drain.
 			select {
 			case <-b.abortCh:
 				return
@@ -226,6 +268,13 @@ func (b *Broker) dispatch(queue string) {
 				// Authoritative drain-complete for this queue: the queue is
 				// empty AND no worker is in flight, so nothing can re-enqueue
 				// after we exit.
+				return
+			}
+
+			// Per-queue drain (Drain method): same quiescence condition,
+			// but only stops THIS queue's dispatcher, not the whole broker.
+			if b.isQueueDraining(queue) && b.quiescent(queue) {
+				b.signalDrainDone(queue)
 				return
 			}
 
@@ -470,4 +519,140 @@ func (b *Broker) Stats(ctx context.Context, queue string) (storage.QueueStats, e
 // can pass it to packages like dlq without a separate handle.
 func (b *Broker) Store() storage.Storage {
 	return b.store
+}
+
+// --- Pause / Resume / Drain (ADR 0006 §Pause & drain) ---
+
+// Pause stops the dispatcher from dequeuing messages on the given queue.
+// Messages already in-flight continue to run; new messages accumulate in
+// storage until Resume is called. Pause is idempotent.
+func (b *Broker) Pause(queue string) {
+	b.pausedFlag(queue).Store(true)
+}
+
+// Resume allows the dispatcher to start dequeuing messages again. If the
+// dispatcher has already exited (e.g. after Drain), Resume re-registers the
+// handler's dispatcher. Resume is idempotent.
+func (b *Broker) Resume(queue string) {
+	b.pausedFlag(queue).Store(false)
+	// Nudge the dispatcher in case it's sleeping in the poll loop.
+	b.hMu.RLock()
+	wake, ok := b.dispatchC[queue]
+	b.hMu.RUnlock()
+	if ok {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// Drain processes all remaining messages on the given queue to quiescence
+// (empty Dequeue + zero in-flight workers), then stops that queue's
+// dispatcher. It blocks until the drain completes or ctx expires.
+//
+// Unlike Shutdown, Drain only affects a single queue — other queues keep
+// running. After Drain returns, the queue's dispatcher has exited; Pause +
+// Resume can restart it (Resume re-registers if needed).
+func (b *Broker) Drain(ctx context.Context, queue string) error {
+	// Check if the queue has a running dispatcher. If not, nothing to drain.
+	b.hMu.RLock()
+	_, hasHandler := b.handlers[queue]
+	b.hMu.RUnlock()
+	if !hasHandler {
+		return nil
+	}
+
+	// Set the per-queue drain flag.
+	b.qDrainingFlag(queue).Store(true)
+
+	// Signal the dispatcher to wake up and notice the drain flag.
+	b.hMu.RLock()
+	wake, ok := b.dispatchC[queue]
+	b.hMu.RUnlock()
+	if ok {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
+
+	// Wait for the dispatcher to signal completion, or ctx to expire.
+	b.qDrainingMu.Lock()
+	done := b.drainDone[queue]
+	b.qDrainingMu.Unlock()
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		// Clean up: clear the flag so the dispatcher doesn't exit later.
+		b.qDrainingFlag(queue).Store(false)
+		return ctx.Err()
+	}
+
+	// Cleanup: purge dedupe entries for this queue to free memory.
+	b.dedupe.purge(queue)
+	return nil
+}
+
+// --- helpers ---
+
+// pausedFlag returns the atomic flag for a queue, creating one on demand.
+func (b *Broker) pausedFlag(queue string) *atomic.Bool {
+	b.pausedMu.Lock()
+	defer b.pausedMu.Unlock()
+	f, ok := b.paused[queue]
+	if !ok {
+		f = &atomic.Bool{}
+		b.paused[queue] = f
+	}
+	return f
+}
+
+// isPaused reports whether a queue is paused.
+func (b *Broker) isPaused(queue string) bool {
+	return b.pausedFlag(queue).Load()
+}
+
+// qDrainingFlag returns the atomic drain flag for a queue, creating one on
+// demand.
+func (b *Broker) qDrainingFlag(queue string) *atomic.Bool {
+	b.qDrainingMu.Lock()
+	defer b.qDrainingMu.Unlock()
+	f, ok := b.qDraining[queue]
+	if !ok {
+		f = &atomic.Bool{}
+		b.qDraining[queue] = f
+		// Also ensure a done channel exists.
+		if _, ok := b.drainDone[queue]; !ok {
+			b.drainDone[queue] = make(chan struct{})
+		}
+	}
+	return f
+}
+
+// isQueueDraining reports whether a per-queue drain has been requested.
+func (b *Broker) isQueueDraining(queue string) bool {
+	b.qDrainingMu.Lock()
+	defer b.qDrainingMu.Unlock()
+	f, ok := b.qDraining[queue]
+	if !ok {
+		return false
+	}
+	return f.Load()
+}
+
+// signalDrainDone closes the done channel for a queue's drain, unblocking
+// Drain's wait. It creates a fresh channel for future drains.
+func (b *Broker) signalDrainDone(queue string) {
+	b.qDrainingMu.Lock()
+	defer b.qDrainingMu.Unlock()
+	if ch, ok := b.drainDone[queue]; ok {
+		select {
+		case <-ch:
+			// Already closed — nothing to do.
+		default:
+			close(ch)
+		}
+	}
 }
