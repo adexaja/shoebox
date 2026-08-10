@@ -116,6 +116,54 @@ q.Use(shoebox.TimeoutMiddleware(30*time.Second))
 converts the panic to an error so the message is retried or dead-lettered
 instead of crashing the process.
 
+### Standalone server (`shoeboxd`)
+
+Run shoebox as a standalone HTTP server with a dashboard, REST API, Prometheus
+metrics, and per-queue webhook push delivery:
+
+```sh
+shoeboxd --config=config.yaml
+```
+
+Example `config.yaml`:
+
+```yaml
+server:
+  addr: ":8080"
+  auth_token: "secret"
+
+storage:
+  kind: sqlite
+  path: "shoebox.db"
+
+webhooks:
+  orders:
+    url: "https://hooks.example.com/orders"
+    timeout: 10s
+```
+
+CLI flags (`--addr`, `--storage`, `--path`, `--dsn`, `--auth-token`) override
+config-file values. See `cmd/shoeboxd/config.example.yaml`.
+
+**HTTP API** (6 endpoints under `/api/`):
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/queues/{name}/messages` | Enqueue a message |
+| `GET` | `/queues/{name}/messages/next` | Pull-consume one message |
+| `GET` | `/queues/{name}/stats` | Queue depth + counters |
+| `GET` | `/queues/{name}/dlq` | List dead-letter messages |
+| `POST` | `/queues/{name}/dlq/{id}/replay` | Replay a dead message |
+| `DELETE` | `/queues/{name}/messages/{id}` | Ack/delete a message |
+
+**Webhook push delivery** — declare webhooks in the config file and the broker
+POSTs each message to the target URL. Non-2xx triggers the normal
+retry/backoff/DLQ path. Also usable in library mode:
+
+```go
+q.Handle("orders", shoebox.WebhookHandler("https://hooks.example.com/orders"))
+```
+
 ## Status
 
 | Epic | Title | Status |
@@ -134,9 +182,11 @@ All code is tested under `go test -race`. See the parent `docs/` directory
 ```
 .
 ├── shoebox.go              # public API
+├── webhook.go              # WebhookHandler (push delivery)
 ├── options.go              # Options, HandlerOptions, EnqueueOptions
 ├── message.go              # Message and QueueStats types
 ├── middleware.go           # built-in middleware
+├── metrics.go              # Prometheus collectors
 ├── migrations/             # versioned SQL migrations (SQLite + Postgres)
 ├── cmd/shoeboxd/           # standalone server binary (E4)
 ├── examples/               # runnable examples
@@ -148,6 +198,7 @@ All code is tested under `go test -race`. See the parent `docs/` directory
     ├── retry/              # exponential + constant backoff
     ├── dlq/                # dead-letter queue manager
     ├── api/                # HTTP API (E4)
+    ├── config/             # YAML config parser (shoeboxd)
     └── dashboard/          # web UI (E4)
 ```
 

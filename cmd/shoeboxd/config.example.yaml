@@ -1,0 +1,26 @@
+# shoeboxd configuration file.
+#
+# Usage:  shoeboxd --config=config.yaml
+#
+# Command-line flags override config-file values for the same field.
+# Webhooks can ONLY be declared here (not via flags) — one entry per queue.
+
+server:
+  addr: ":8080"
+  auth_token: ""           # leave empty to disable auth
+
+storage:
+  kind: memory             # memory | sqlite | postgres
+  path: "shoebox.db"       # sqlite only
+  dsn: ""                  # postgres only, e.g. "host=localhost port=5432 dbname=shoebox user=postgres password=secret sslmode=disable"
+
+# Per-queue webhook targets. A queue listed here is push-delivered by the
+# broker: each message is POSTed to the URL, and non-2xx triggers normal
+# retry/backoff/DLQ. Don't also pull these queues via the HTTP API.
+webhooks:
+  orders:
+    url: "https://hooks.example.com/orders"
+    timeout: 10s                       # per-request HTTP timeout
+    content_type: "application/json"   # Content-Type header on POST
+  # emails:
+  #   url: "https://hooks.example.com/emails"

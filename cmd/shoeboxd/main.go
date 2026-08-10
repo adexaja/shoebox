@@ -1,13 +1,17 @@
 // Command shoeboxd is the standalone server binary for shoebox. It exposes
 // the full HTTP API (enqueue, consume, ack, stats, DLQ), a web dashboard,
-// and Prometheus metrics — all backed by the same engine the library uses
-// in-process.
+// Prometheus metrics, and optional per-queue webhook push delivery — all
+// backed by the same engine the library uses in-process.
 //
 // Usage:
 //
+//	shoeboxd --config=config.yaml
 //	shoeboxd --addr=:8080 --storage=sqlite --path=/var/lib/shoebox.db
 //	shoeboxd --storage=memory --auth-token=secret
-//	shoeboxd --storage=postgres --dsn="host=localhost port=5432 ..."
+//
+// When --config is given, the config file provides server/storage/webhook
+// settings. CLI flags override config-file values for the same field.
+// Webhooks are declared only in the config file (see config.example.yaml).
 package main
 
 import (
@@ -24,17 +28,19 @@ import (
 
 	"github.com/adexaja/shoebox"
 	"github.com/adexaja/shoebox/internal/api"
-	"github.com/adexaja/shoebox/internal/dlq"
+	"github.com/adexaja/shoebox/internal/config"
 	"github.com/adexaja/shoebox/internal/dashboard"
+	"github.com/adexaja/shoebox/internal/dlq"
 )
 
 func main() {
 	var (
-		addr      = flag.String("addr", ":8080", "address to listen on")
-		storage   = flag.String("storage", "memory", "memory | sqlite | postgres")
-		dbPath    = flag.String("path", "shoebox.db", "SQLite database path")
-		dsn       = flag.String("dsn", "", "Postgres DSN (key=value format)")
-		authToken = flag.String("auth-token", "", "bearer token / X-API-Key for API auth (empty = no auth)")
+		configPath = flag.String("config", "", "path to YAML config file (overrides flags)")
+		addr       = flag.String("addr", "", "address to listen on (overrides config)")
+		storage    = flag.String("storage", "", "memory | sqlite | postgres (overrides config)")
+		dbPath     = flag.String("path", "", "SQLite database path (overrides config)")
+		dsn        = flag.String("dsn", "", "Postgres DSN (overrides config)")
+		authToken  = flag.String("auth-token", "", "bearer token / X-API-Key (overrides config)")
 	)
 	flag.Parse()
 
@@ -42,22 +48,46 @@ func main() {
 		Level: slog.LevelInfo,
 	}))
 
+	// --- load config ---
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "shoeboxd: config: %v\n", err)
+		os.Exit(1)
+	}
+
+	// CLI flags override config-file values.
+	if *addr != "" {
+		cfg.Server.Addr = *addr
+	}
+	if *storage != "" {
+		cfg.Storage.Kind = *storage
+	}
+	if *dbPath != "" {
+		cfg.Storage.Path = *dbPath
+	}
+	if *dsn != "" {
+		cfg.Storage.DSN = *dsn
+	}
+	if *authToken != "" {
+		cfg.Server.AuthToken = *authToken
+	}
+
+	// --- build engine ---
 	opts := shoebox.Options{Logger: logger}
-	switch *storage {
+	switch cfg.Storage.Kind {
 	case "memory":
 		opts.Storage = shoebox.Memory
 	case "sqlite":
 		opts.Storage = shoebox.SQLite
-		opts.Path = *dbPath
+		opts.Path = cfg.Storage.Path
 	case "postgres":
 		opts.Storage = shoebox.Postgres
-		opts.DSN = *dsn
+		opts.DSN = cfg.Storage.DSN
 	default:
-		fmt.Fprintf(os.Stderr, "shoeboxd: unknown --storage=%q\n", *storage)
+		fmt.Fprintf(os.Stderr, "shoeboxd: unknown storage %q\n", cfg.Storage.Kind)
 		os.Exit(2)
 	}
 
-	// --- build engine ---
 	q, err := shoebox.New(opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "shoeboxd: failed to create queue: %v\n", err)
@@ -68,6 +98,22 @@ func main() {
 		defer cancel()
 		_ = q.Shutdown(ctx)
 	}()
+
+	// --- register push webhooks from config ---
+	for queue, wh := range cfg.Webhooks {
+		var whOpts []shoebox.WebhookOption
+		if wh.Timeout > 0 {
+			whOpts = append(whOpts, shoebox.WithWebhookTimeout(wh.Timeout))
+		}
+		if wh.ContentType != "" {
+			whOpts = append(whOpts, shoebox.WithWebhookContentType(wh.ContentType))
+		}
+		q.Handle(queue, shoebox.WebhookHandler(wh.URL, nil, whOpts...))
+		logger.Info("webhook registered",
+			slog.String("queue", queue),
+			slog.String("url", wh.URL),
+		)
+	}
 
 	dlqMgr := dlq.NewManager(q.Store())
 	apiHandler := api.NewHandler(q.Store(), dlqMgr, logger)
@@ -89,7 +135,7 @@ func main() {
 		api.RecoveryMiddleware(logger),
 		api.RequestIDMiddleware(),
 		api.LoggingMiddleware(logger),
-		api.AuthMiddleware(*authToken),
+		api.AuthMiddleware(cfg.Server.AuthToken),
 	)
 	mux.Handle("/api/", apiMiddleware(http.StripPrefix("/api", apiMux)))
 
@@ -98,9 +144,8 @@ func main() {
 
 	// --- start server ---
 	srv := &http.Server{
-		Addr:    *addr,
+		Addr:    cfg.Server.Addr,
 		Handler: mux,
-		// Generous timeouts for slow DLQ operations.
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -110,14 +155,14 @@ func main() {
 	// Background depth-gauge refresher.
 	gaugeCtx, gaugeCancel := context.WithCancel(context.Background())
 	defer gaugeCancel()
-	go refreshDepthGauges(gaugeCtx, q, logger)
+	go refreshDepthGauges(gaugeCtx, q)
 
 	// Graceful shutdown on SIGINT/SIGTERM.
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("shoeboxd starting",
-			slog.String("addr", *addr),
-			slog.String("storage", *storage),
+			slog.String("addr", cfg.Server.Addr),
+			slog.String("storage", cfg.Storage.Kind),
 		)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
@@ -145,7 +190,7 @@ func main() {
 
 // refreshDepthGauges polls queue depths every 5 seconds so Prometheus
 // has current values without the caller needing to hit UpdateDepthGauges.
-func refreshDepthGauges(ctx context.Context, q *shoebox.Queue, logger *slog.Logger) {
+func refreshDepthGauges(ctx context.Context, q *shoebox.Queue) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
