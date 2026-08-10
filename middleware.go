@@ -35,18 +35,27 @@ func LoggingMiddlewareWith(logger *slog.Logger) Middleware {
 	return func(next HandlerFunc) HandlerFunc {
 		return func(ctx context.Context, m Message) error {
 			start := time.Now()
-			logger.InfoContext(ctx, "shoebox: handling",
+			logger.DebugContext(ctx, "shoebox: handling",
 				slog.String("queue", m.Queue),
 				slog.String("id", m.ID),
 				slog.Int("attempt", m.Attempts),
 			)
 			err := next(ctx, m)
-			logger.InfoContext(ctx, "shoebox: handled",
-				slog.String("queue", m.Queue),
-				slog.String("id", m.ID),
-				slog.Duration("elapsed", time.Since(start)),
-				slog.Any("err", errOrNil(err)),
-			)
+			if err != nil {
+				logger.WarnContext(ctx, "shoebox: handler error",
+					slog.String("queue", m.Queue),
+					slog.String("id", m.ID),
+					slog.Int("attempt", m.Attempts),
+					slog.Duration("elapsed", time.Since(start)),
+					slog.Any("err", err),
+				)
+			} else {
+				logger.InfoContext(ctx, "shoebox: handled",
+					slog.String("queue", m.Queue),
+					slog.String("id", m.ID),
+					slog.Duration("elapsed", time.Since(start)),
+				)
+			}
 			return err
 		}
 	}
@@ -95,13 +104,27 @@ func RecoveryMiddlewareWith(logger *slog.Logger) Middleware {
 	}
 }
 
-// MetricsMiddleware increments in-process counters. It is intentionally
-// dependency-free in v0.1; pair it with a Prometheus exporter added in
-// Week 3 (see docs/tasks.md E3).
-func MetricsMiddleware() Middleware {
+// MetricsMiddleware records Prometheus metrics for every handler invocation:
+// processed/errors counters, handler duration histogram. Requires a non-nil
+// *Metrics; panics if nil to catch wiring mistakes at registration time.
+func MetricsMiddleware(metrics *Metrics) Middleware {
+	if metrics == nil {
+		panic("shoebox: MetricsMiddleware requires a non-nil *Metrics")
+	}
 	return func(next HandlerFunc) HandlerFunc {
 		return func(ctx context.Context, m Message) error {
-			return next(ctx, m)
+			start := time.Now()
+			err := next(ctx, m)
+
+			metrics.Duration.WithLabelValues(m.Queue).
+				Observe(time.Since(start).Seconds())
+
+			if err != nil {
+				metrics.Errors.WithLabelValues(m.Queue).Inc()
+			} else {
+				metrics.Processed.WithLabelValues(m.Queue).Inc()
+			}
+			return err
 		}
 	}
 }

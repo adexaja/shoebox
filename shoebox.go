@@ -7,22 +7,27 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/adexaja/shoebox/internal/broker"
 	"github.com/adexaja/shoebox/internal/retry"
 	"github.com/adexaja/shoebox/internal/storage"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Queue is the public-facing message queue. It is safe for concurrent use.
 type Queue struct {
-	b *broker.Broker
+	b          *broker.Broker
+	metrics    *Metrics
+	registry   *prometheus.Registry
 }
 
 // New constructs a Queue backed by the storage kind selected in opts.
 //
 // Memory is in-process and volatile. SQLite persists to opts.Path and
-// survives restarts. Postgres is not yet implemented.
+// survives restarts. Postgres uses opts.DSN.
 func New(opts Options) (*Queue, error) {
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = 4
@@ -36,13 +41,16 @@ func New(opts Options) (*Queue, error) {
 		return nil, err
 	}
 
-	return &Queue{
+	q := &Queue{
 		b: broker.New(broker.Options{
 			Storage:     store,
 			Concurrency: opts.Concurrency,
 			Logger:      opts.Logger,
 		}),
-	}, nil
+		registry: opts.MetricsRegistry,
+	}
+	q.metrics = NewMetrics("", opts.MetricsRegistry)
+	return q, nil
 }
 
 // buildStorage returns the Storage implementation for the requested kind.
@@ -153,4 +161,47 @@ func (q *Queue) Healthy() bool {
 // Queue was created.
 func (q *Queue) Stats(ctx context.Context, queue string) (QueueStats, error) {
 	return q.b.Stats(ctx, queue)
+}
+
+// Queues returns the names of all registered queues.
+func (q *Queue) Queues() []string {
+	return q.b.Queues()
+}
+
+// Store returns the underlying storage interface. Exposed so that packages
+// like dlq can access the storage layer without a separate handle.
+func (q *Queue) Store() storage.Storage {
+	return q.b.Store()
+}
+
+// MetricsHandler returns an http.Handler that exposes Prometheus metrics.
+// Mount it at /metrics:
+//
+//	http.Handle("/metrics", q.MetricsHandler())
+//
+// If a custom registry was passed via Options.MetricsRegistry, it is used;
+// otherwise the default Prometheus registry is used. The handler also updates
+// the queue_depth gauge for every registered queue on each scrape so the
+// gauge reflects the current depth without a background polling goroutine.
+func (q *Queue) MetricsHandler() http.Handler {
+	registry := q.registry
+	if registry == nil {
+		return promhttp.Handler()
+	}
+	return promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
+}
+
+// UpdateDepthGauges refreshes the queue_depth gauge for every registered
+// queue by reading live depth from storage. Call this periodically (e.g. every
+// 5 seconds) or from a custom /metrics handler before scraping. The
+// MetricsHandler returned by this method does NOT call this automatically;
+// the caller is responsible for the polling cadence.
+func (q *Queue) UpdateDepthGauges(ctx context.Context) {
+	for _, queue := range q.Queues() {
+		stats, err := q.Stats(ctx, queue)
+		if err != nil {
+			continue
+		}
+		q.metrics.Depth.WithLabelValues(queue).Set(float64(stats.Depth))
+	}
 }

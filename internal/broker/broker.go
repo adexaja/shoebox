@@ -449,9 +449,27 @@ var errAlreadyClosed = errors.New("shoebox: queue already shut down")
 // false once Shutdown has been called.
 func (b *Broker) Healthy() bool { return !b.shuttingDown.Load() }
 
+// Queues returns the names of all registered queues. Used by the metrics
+// depth collector to know which queues to poll on scrape.
+func (b *Broker) Queues() []string {
+	b.hMu.RLock()
+	defer b.hMu.RUnlock()
+	out := make([]string, 0, len(b.handlers))
+	for q := range b.handlers {
+		out = append(out, q)
+	}
+	return out
+}
+
 // Stats returns a snapshot of queue stats.
 func (b *Broker) Stats(ctx context.Context, queue string) (storage.QueueStats, error) {
 	return b.store.Stats(ctx, queue)
+}
+
+// Store returns the underlying storage interface. Exposed so the public Queue
+// can pass it to packages like dlq without a separate handle.
+func (b *Broker) Store() storage.Storage {
+	return b.store
 }
 
 // newID returns a 16-byte random hex string. We avoid pulling in a UUID

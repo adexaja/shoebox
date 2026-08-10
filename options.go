@@ -5,10 +5,10 @@ import (
 	"time"
 
 	"github.com/adexaja/shoebox/internal/retry"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
-// StorageKind selects a storage backend. Only Memory is implemented in Week 1;
-// SQLite and Postgres are placeholders for Week 2.
+// StorageKind selects a storage backend.
 type StorageKind int
 
 const (
@@ -36,6 +36,12 @@ type Options struct {
 
 	// Logger receives structured events. Defaults to slog.Default().
 	Logger *slog.Logger
+
+	// MetricsRegistry is the Prometheus registry used by MetricsMiddleware
+	// and MetricsHandler. If nil, prometheus.DefaultRegisterer is used.
+	// Set this to a custom registry when running multiple shoebox instances
+	// in the same process or to isolate metrics in tests.
+	MetricsRegistry *prometheus.Registry
 }
 
 // HandlerOptions configures a single registered handler.

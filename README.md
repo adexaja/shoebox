@@ -14,7 +14,7 @@ existed.
 import "github.com/adexaja/shoebox"
 
 func main() {
-    q := shoebox.New(shoebox.Options{
+    q, _ := shoebox.New(shoebox.Options{
         Storage: shoebox.Memory, // or shoebox.SQLite, shoebox.Postgres
     })
 
@@ -27,19 +27,89 @@ func main() {
 }
 ```
 
+## Features
+
+### Storage backends
+
+| Backend | Config | Survives restarts | Notes |
+|---------|--------|-------------------|-------|
+| **Memory** | `shoebox.Memory` | No | In-process slice + mutex. Zero dependencies. Default for dev/testing. |
+| **SQLite** | `shoebox.SQLite` + `Options.Path` | Yes | Pure-Go driver (`modernc.org/sqlite`, no CGo). Crash recovery via status lifecycle. |
+| **Postgres** | `shoebox.Postgres` + `Options.DSN` | Yes | `pgx/v5` with connection pool. `SELECT … FOR UPDATE SKIP LOCKED` for safe concurrent consumers. |
+
+```go
+// SQLite — survives restarts, zero config
+q, _ := shoebox.New(shoebox.Options{
+    Storage: shoebox.SQLite,
+    Path:    "/var/lib/myapp/queue.db",
+})
+
+// Postgres — multiple consumer processes, horizontal scaling
+q, _ := shoebox.New(shoebox.Options{
+    Storage: shoebox.Postgres,
+    DSN:     "host=localhost port=5432 dbname=shoebox user=postgres sslmode=disable",
+})
+```
+
+### Retry with backoff
+
+Configurable max retries per handler with exponential, constant, or custom
+backoff strategies. Messages that exhaust their retries are moved to a
+dead-letter queue automatically.
+
+```go
+q.Handle("webhooks", handler, shoebox.HandlerOptions{
+    MaxRetries: 10,
+    Timeout:    30 * time.Second,
+})
+```
+
+### Dead-letter queue (DLQ)
+
+Every queue gets a `{queue}.dlq` shadow queue. Failed messages retain their
+original payload, the last error, retry count, and timestamp. List, inspect,
+and replay programmatically:
+
+```go
+mgr := dlq.NewManager(q.Store())
+records, _ := mgr.List(ctx, "orders", 50)     // browse dead messages
+record, _ := mgr.Inspect(ctx, "orders", id)   // inspect a single message
+mgr.Replay(ctx, "orders", id)                 // move back to source queue
+```
+
+### Graceful shutdown
+
+`Shutdown(ctx)` drains all queues to authoritative quiescence — every
+in-flight handler completes (or the context expires), follow-up enqueues from
+handlers are picked up, and the store is closed exactly once.
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+q.Shutdown(ctx)
+```
+
+### Middleware
+
+Built-in middleware applies in registration order:
+
+```go
+q.Use(shoebox.LoggingMiddleware())
+q.Use(shoebox.RecoveryMiddleware())
+```
+
 ## Status
 
-**Week 1 — Core broker + memory storage** is in progress. The in-memory
-storage backend and the broker dispatch loop are working; SQLite, Postgres,
-retry/DLQ, middleware, and the standalone server are placeholders for the
-upcoming weeks.
+| Epic | Title | Status |
+|------|-------|--------|
+| E1 | Core broker + memory storage | ✅ Done |
+| E2 | Persistence + retry + DLQ | ✅ Done |
+| E3 | Observability + middleware | ⏳ Pending |
+| E4 | Standalone server | ⏳ Pending |
+| E5 | Polish + launch | ⏳ Pending |
 
-See the parent `docs/` directory (not git-tracked) for:
-
-- `docs/epics.md` — high-level milestones
-- `docs/user-stories.md` — user stories per epic
-- `docs/tasks.md` — granular task breakdown
-- `docs/adr/` — architecture decision records
+All code is tested under `go test -race`. See the parent `docs/` directory
+(not git-tracked) for epics, user stories, tasks, and ADRs.
 
 ## Layout
 
@@ -49,15 +119,18 @@ See the parent `docs/` directory (not git-tracked) for:
 ├── options.go              # Options, HandlerOptions, EnqueueOptions
 ├── message.go              # Message and QueueStats types
 ├── middleware.go           # built-in middleware
-├── cmd/shoeboxd/           # standalone server binary (Week 4)
+├── migrations/             # versioned SQL migrations (SQLite + Postgres)
+├── cmd/shoeboxd/           # standalone server binary (E4)
 ├── examples/               # runnable examples
+│   ├── lead-assignment/    # round-robin + follow-up enqueue
+│   └── webhook-retry/      # exponential backoff + DLQ
 └── internal/
-    ├── broker/             # dispatch + lifecycle
-    ├── storage/            # Storage interface + backends
-    ├── retry/              # backoff strategies
-    ├── dlq/                # dead-letter queue (Week 2)
-    ├── api/                # HTTP API (Week 4)
-    └── dashboard/          # web UI (Week 4)
+    ├── broker/             # dispatch engine + lifecycle
+    ├── storage/            # Storage interface + Memory/SQLite/Postgres
+    ├── retry/              # exponential + constant backoff
+    ├── dlq/                # dead-letter queue manager
+    ├── api/                # HTTP API (E4)
+    └── dashboard/          # web UI (E4)
 ```
 
 ## License
