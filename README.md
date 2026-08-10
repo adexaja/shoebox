@@ -89,14 +89,32 @@ defer cancel()
 q.Shutdown(ctx)
 ```
 
-### Middleware
+### Observability
 
-Built-in middleware applies in registration order:
+Prometheus metrics (per-queue labels): depth gauge, processed/errors/retries/
+dead counters, handler duration histogram. Mount the handler at `/metrics`:
 
 ```go
-q.Use(shoebox.LoggingMiddleware())
-q.Use(shoebox.RecoveryMiddleware())
+http.Handle("/metrics", q.MetricsHandler())
 ```
+
+Pass a custom registry via `Options.MetricsRegistry` to isolate metrics in
+tests or run multiple shoebox instances in one process.
+
+### Middleware
+
+Built-in middleware applies in registration order (first `Use` is outermost):
+
+```go
+q.Use(shoebox.RecoveryMiddleware())           // recover panics → error → retry/DLQ
+q.Use(shoebox.MetricsMiddleware(q.metrics))   // record Prometheus metrics
+q.Use(shoebox.LoggingMiddleware())            // structured slog logs
+q.Use(shoebox.TimeoutMiddleware(30*time.Second))
+```
+
+`RecoveryMiddleware` catches handler panics, logs the stack trace, and
+converts the panic to an error so the message is retried or dead-lettered
+instead of crashing the process.
 
 ## Status
 
@@ -104,7 +122,7 @@ q.Use(shoebox.RecoveryMiddleware())
 |------|-------|--------|
 | E1 | Core broker + memory storage | ✅ Done |
 | E2 | Persistence + retry + DLQ | ✅ Done |
-| E3 | Observability + middleware | ⏳ Pending |
+| E3 | Observability + middleware | ✅ Done |
 | E4 | Standalone server | ⏳ Pending |
 | E5 | Polish + launch | ⏳ Pending |
 
