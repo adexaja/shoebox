@@ -18,6 +18,10 @@ type Memory struct {
 	mu       sync.Mutex
 	queues   map[string][]Message
 	counters map[string]*QueueStats
+	// dirty marks queues whose pending slice has been modified since the
+	// last sort. Dequeue only re-sorts dirty queues, avoiding an O(n log n)
+	// pass on every 250ms idle poll.
+	dirty map[string]bool
 }
 
 // NewMemory returns an empty in-memory storage backend.
@@ -25,6 +29,7 @@ func NewMemory() *Memory {
 	return &Memory{
 		queues:   make(map[string][]Message),
 		counters: make(map[string]*QueueStats),
+		dirty:    make(map[string]bool),
 	}
 }
 
@@ -48,6 +53,7 @@ func (m *Memory) Enqueue(_ context.Context, queue string, msg Message) error {
 		msg.ScheduledAt = msg.CreatedAt
 	}
 	m.queues[queue] = append(m.queues[queue], msg)
+	m.dirty[queue] = true
 	return nil
 }
 
@@ -70,15 +76,18 @@ func (m *Memory) Dequeue(_ context.Context, queue string, limit int) ([]Message,
 	now := time.Now()
 
 	// Sort pending by (priority DESC, created_at ASC) so the scan picks
-	// the highest-priority due message first. This is critical for
-	// concurrency=1 (limit=1): without it the scan grabs the first due
-	// message in insertion order, ignoring priority entirely.
-	sort.SliceStable(pending, func(i, j int) bool {
-		if pending[i].Priority != pending[j].Priority {
-			return pending[i].Priority > pending[j].Priority
-		}
-		return pending[i].CreatedAt.Before(pending[j].CreatedAt)
-	})
+	// the highest-priority due message first. Only re-sort when the queue
+	// has been modified since the last Dequeue — the dispatcher polls every
+	// 250ms, and re-sorting an unchanged slice is wasted work.
+	if m.dirty[queue] {
+		sort.SliceStable(pending, func(i, j int) bool {
+			if pending[i].Priority != pending[j].Priority {
+				return pending[i].Priority > pending[j].Priority
+			}
+			return pending[i].CreatedAt.Before(pending[j].CreatedAt)
+		})
+		delete(m.dirty, queue)
+	}
 
 	out := make([]Message, 0, limit)
 	kept := pending[:0]

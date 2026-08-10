@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS shoebox_messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_shoebox_dequeue
-    ON shoebox_messages(queue, status, scheduled_at);
+    ON shoebox_messages(queue, status, priority DESC, scheduled_at);
 
 CREATE INDEX IF NOT EXISTS idx_shoebox_dlq
     ON shoebox_messages(queue, status);

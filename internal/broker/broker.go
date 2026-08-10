@@ -353,7 +353,10 @@ func (b *Broker) handleOne(queue string, msg storage.Message) {
 		// races with Enqueue eventually picks the message up.
 		next := time.Now().Add(100 * time.Millisecond)
 		msg.ScheduledAt = next
-		_ = b.store.Enqueue(b.storeCtx(), queue, msg)
+		if err := b.store.Enqueue(b.storeCtx(), queue, msg); err != nil {
+			b.logger.ErrorContext(b.storeCtx(), "shoebox: re-enqueue (no handler) failed",
+				slog.String("queue", queue), slog.String("id", msg.ID), slog.Any("err", err))
+		}
 		return
 	}
 
@@ -370,7 +373,10 @@ func (b *Broker) handleOne(queue string, msg storage.Message) {
 	defer cancel()
 	err := h.chain(ctx, msg)
 	if err == nil {
-		_ = b.store.Ack(b.storeCtx(), queue, msg.ID)
+		if err := b.store.Ack(b.storeCtx(), queue, msg.ID); err != nil {
+			b.logger.ErrorContext(b.storeCtx(), "shoebox: ack failed",
+				slog.String("queue", queue), slog.String("id", msg.ID), slog.Any("err", err))
+		}
 		return
 	}
 
@@ -388,7 +394,10 @@ func (b *Broker) handleOne(queue string, msg storage.Message) {
 
 	delay := h.opts.Backoff.Next(msg.Attempts)
 	msg.ScheduledAt = time.Now().Add(delay)
-	_ = b.store.Nack(b.storeCtx(), queue, msg.ID, err)
+	if err := b.store.Nack(b.storeCtx(), queue, msg.ID, err); err != nil {
+		b.logger.ErrorContext(b.storeCtx(), "shoebox: nack failed",
+			slog.String("queue", queue), slog.String("id", msg.ID), slog.Any("err", err))
+	}
 	if err := b.store.Enqueue(b.storeCtx(), queue, msg); err != nil {
 		b.logger.ErrorContext(b.storeCtx(), "shoebox: re-enqueue failed",
 			slog.String("queue", queue), slog.String("id", msg.ID), slog.Any("err", err))
@@ -420,7 +429,10 @@ func (b *Broker) toDeadLetter(queue string, msg storage.Message, handlerErr erro
 		b.logger.ErrorContext(b.storeCtx(), "shoebox: dlq enqueue failed",
 			slog.String("queue", queue), slog.String("id", msg.ID), slog.Any("err", err))
 	}
-	_ = b.store.Dead(b.storeCtx(), queue, msg.ID, handlerErr)
+	if err := b.store.Dead(b.storeCtx(), queue, msg.ID, handlerErr); err != nil {
+		b.logger.ErrorContext(b.storeCtx(), "shoebox: dead-letter stat failed",
+			slog.String("queue", queue), slog.String("id", msg.ID), slog.Any("err", err))
+	}
 }
 
 // Shutdown drains the queues and stops the dispatchers.
