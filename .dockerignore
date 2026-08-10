@@ -1,0 +1,20 @@
+# Build artifacts
+bin/
+*.exe
+*.test
+*.out
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Git
+.git/
+.gitignore
+
+# Test files (not needed in the build context)
+*_test.go
+
+# Docs (kept in parent docs/, not here)
+docs/

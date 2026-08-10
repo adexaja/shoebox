@@ -171,10 +171,11 @@ q.Handle("orders", shoebox.WebhookHandler("https://hooks.example.com/orders"))
 | E1 | Core broker + memory storage | ✅ Done |
 | E2 | Persistence + retry + DLQ | ✅ Done |
 | E3 | Observability + middleware | ✅ Done |
-| E4 | Standalone server | ⏳ Pending |
-| E5 | Polish + launch | ⏳ Pending |
+| E4 | Standalone server + webhooks | ✅ Done |
+| E5 | Polish + launch | ✅ Done |
+| E6 | Advanced features (delay, dedupe, priority, pause/drain) | 📋 Planned |
 
-All code is tested under `go test -race`. See the parent `docs/` directory
+**115+ tests**, all `-race`-clean. See the parent `docs/` directory
 (not git-tracked) for epics, user stories, tasks, and ADRs.
 
 ## Layout
@@ -191,7 +192,8 @@ All code is tested under `go test -race`. See the parent `docs/` directory
 ├── cmd/shoeboxd/           # standalone server binary (E4)
 ├── examples/               # runnable examples
 │   ├── lead-assignment/    # round-robin + follow-up enqueue
-│   └── webhook-retry/      # exponential backoff + DLQ
+│   ├── webhook-retry/      # exponential backoff + DLQ
+│   └── email-sender/       # batch email with retry/backoff
 └── internal/
     ├── broker/             # dispatch engine + lifecycle
     ├── storage/            # Storage interface + Memory/SQLite/Postgres
@@ -201,6 +203,25 @@ All code is tested under `go test -race`. See the parent `docs/` directory
     ├── config/             # YAML config parser (shoeboxd)
     └── dashboard/          # web UI (E4)
 ```
+
+## Docker
+
+```sh
+# Build the image (multi-stage, distroless runtime — ~15 MB)
+docker build -t shoeboxd .
+
+# Run with defaults (memory storage, port 8080)
+docker run -p 8080:8080 shoeboxd
+
+# Run with SQLite persistence + config file
+docker run -p 8080:8080 \
+  -v $(pwd)/config.yaml:/etc/shoebox/config.yaml:ro \
+  -v shoebox-data:/data \
+  shoeboxd --config=/etc/shoebox/config.yaml
+```
+
+The image runs as non-root (`distroless/static-debian12:nonroot`). Override
+any setting with CLI flags (they take precedence over the config file).
 
 ## License
 

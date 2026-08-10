@@ -30,3 +30,4 @@ coverage.*
 *.local
 .serena
 .claude/.headroom*
+./email-sender
