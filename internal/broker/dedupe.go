@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -70,7 +71,7 @@ func (d *dedupeTable) purge(queue string) {
 	defer d.mu.Unlock()
 	prefix := queue + "\x00"
 	for k := range d.seen {
-		if len(k) > len(prefix) && k[:len(prefix)] == prefix {
+		if strings.HasPrefix(k, prefix) {
 			delete(d.seen, k)
 		}
 	}

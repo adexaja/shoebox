@@ -563,8 +563,21 @@ func (b *Broker) Drain(ctx context.Context, queue string) error {
 		return nil
 	}
 
-	// Set the per-queue drain flag.
-	b.qDrainingFlag(queue).Store(true)
+	// Set up the per-queue drain flag and a fresh done channel.
+	// The done channel is created (or replaced) under the lock so that
+	// signalDrainDone sees the same channel we wait on below.
+	b.qDrainingMu.Lock()
+	flag, ok := b.qDraining[queue]
+	if !ok {
+		flag = &atomic.Bool{}
+		b.qDraining[queue] = flag
+	}
+	flag.Store(true)
+	// Replace the done channel with a fresh one so a previous (closed)
+	// channel from an earlier Drain doesn't cause a false immediate return.
+	done := make(chan struct{})
+	b.drainDone[queue] = done
+	b.qDrainingMu.Unlock()
 
 	// Signal the dispatcher to wake up and notice the drain flag.
 	b.hMu.RLock()
@@ -577,16 +590,11 @@ func (b *Broker) Drain(ctx context.Context, queue string) error {
 		}
 	}
 
-	// Wait for the dispatcher to signal completion, or ctx to expire.
-	b.qDrainingMu.Lock()
-	done := b.drainDone[queue]
-	b.qDrainingMu.Unlock()
-
 	select {
 	case <-done:
 	case <-ctx.Done():
 		// Clean up: clear the flag so the dispatcher doesn't exit later.
-		b.qDrainingFlag(queue).Store(false)
+		flag.Store(false)
 		return ctx.Err()
 	}
 
@@ -614,23 +622,6 @@ func (b *Broker) isPaused(queue string) bool {
 	return b.pausedFlag(queue).Load()
 }
 
-// qDrainingFlag returns the atomic drain flag for a queue, creating one on
-// demand.
-func (b *Broker) qDrainingFlag(queue string) *atomic.Bool {
-	b.qDrainingMu.Lock()
-	defer b.qDrainingMu.Unlock()
-	f, ok := b.qDraining[queue]
-	if !ok {
-		f = &atomic.Bool{}
-		b.qDraining[queue] = f
-		// Also ensure a done channel exists.
-		if _, ok := b.drainDone[queue]; !ok {
-			b.drainDone[queue] = make(chan struct{})
-		}
-	}
-	return f
-}
-
 // isQueueDraining reports whether a per-queue drain has been requested.
 func (b *Broker) isQueueDraining(queue string) bool {
 	b.qDrainingMu.Lock()
@@ -643,16 +634,12 @@ func (b *Broker) isQueueDraining(queue string) bool {
 }
 
 // signalDrainDone closes the done channel for a queue's drain, unblocking
-// Drain's wait. It creates a fresh channel for future drains.
+// Drain's wait. Drain creates a fresh channel each time, so this close is
+// always the first and only close for that channel.
 func (b *Broker) signalDrainDone(queue string) {
 	b.qDrainingMu.Lock()
 	defer b.qDrainingMu.Unlock()
 	if ch, ok := b.drainDone[queue]; ok {
-		select {
-		case <-ch:
-			// Already closed — nothing to do.
-		default:
-			close(ch)
-		}
+		close(ch)
 	}
 }

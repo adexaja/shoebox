@@ -164,6 +164,69 @@ retry/backoff/DLQ path. Also usable in library mode:
 q.Handle("orders", shoebox.WebhookHandler("https://hooks.example.com/orders"))
 ```
 
+### Delayed & scheduled messages
+
+Defer visibility until a future time — no external scheduler needed:
+
+```go
+// Visible after 30 minutes
+q.Enqueue("reminders", payload, shoebox.Delay(30*time.Minute))
+
+// Visible at a specific time
+q.Enqueue("reports", payload, shoebox.Schedule(time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC)))
+```
+
+If both are set, `Schedule` wins. All backends filter `scheduled_at <= now`
+on Dequeue; the dispatcher's 250ms poll picks up messages whose delay just
+elapsed.
+
+### Priority queues
+
+Higher-priority messages jump ahead of lower-priority ones within the same
+queue. Ties at the same priority level fall back to FIFO (`created_at ASC`).
+
+```go
+q.Enqueue("emails", payload, shoebox.WithPriority(shoebox.High))
+q.Enqueue("emails", payload)                              // default: Low
+```
+
+Constants: `shoebox.Low` (0), `shoebox.Normal` (1), `shoebox.High` (2).
+Implemented as `ORDER BY priority DESC, created_at ASC` on all backends.
+
+### Message deduplication
+
+Suppress duplicate enqueues within a per-key TTL window (default 5 minutes).
+The second Enqueue with the same key is silently dropped (returns nil, no
+store write):
+
+```go
+q.Enqueue("orders", payload, shoebox.DedupeKey("order-123"))
+q.Enqueue("orders", payload, shoebox.DedupeKey("order-123")) // silently dropped
+```
+
+Keys are scoped per-queue — `("orders", "x")` and `("emails", "x")` are
+independent. Dedupe state lives in the broker (not storage), so it does not
+survive a restart.
+
+### Queue lifecycle: Pause, Resume, Drain
+
+Control dispatching without shutting down the whole broker:
+
+```go
+q.Pause("orders")   // stop dequeuing; in-flight handlers finish naturally
+// ... back up, migrate, etc. ...
+q.Resume("orders")  // dispatching resumes
+
+// Process everything to quiescence, then stop just this queue's dispatcher:
+ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+q.Drain(ctx, "orders")
+```
+
+`Pause`/`Resume` are atomic flags (no I/O). `Drain` processes the named
+queue to authoritative quiescence (empty Dequeue + zero in-flight workers),
+then stops only that queue's dispatcher — other queues keep running.
+
 ## Status
 
 | Epic | Title | Status |
@@ -173,9 +236,9 @@ q.Handle("orders", shoebox.WebhookHandler("https://hooks.example.com/orders"))
 | E3 | Observability + middleware | ✅ Done |
 | E4 | Standalone server + webhooks | ✅ Done |
 | E5 | Polish + launch | ✅ Done |
-| E6 | Advanced features (delay, dedupe, priority, pause/drain) | 📋 Planned |
+| E6 | Advanced features (delay, dedupe, priority, pause/drain) | ✅ Done |
 
-**115+ tests**, all `-race`-clean. See the parent `docs/` directory
+**130+ tests**, all `-race`-clean. See the parent `docs/` directory
 (not git-tracked) for epics, user stories, tasks, and ADRs.
 
 ## Layout
@@ -195,7 +258,7 @@ q.Handle("orders", shoebox.WebhookHandler("https://hooks.example.com/orders"))
 │   ├── webhook-retry/      # exponential backoff + DLQ
 │   └── email-sender/       # batch email with retry/backoff
 └── internal/
-    ├── broker/             # dispatch engine + lifecycle
+    ├── broker/             # dispatch engine + lifecycle + dedupe
     ├── storage/            # Storage interface + Memory/SQLite/Postgres
     ├── retry/              # exponential + constant backoff
     ├── dlq/                # dead-letter queue manager
