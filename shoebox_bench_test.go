@@ -10,6 +10,12 @@ import (
 	"time"
 )
 
+// benchmarkDSN is the local development Postgres connection string. The broker
+// Postgres throughput benchmark skips if Postgres is unreachable, so the
+// default `go test ./...` (which only runs benchmarks under -bench) stays
+// green on machines without Postgres.
+const benchmarkDSN = "host=localhost port=5432 dbname=shoebox user=postgres password=123 sslmode=disable"
+
 // benchQueue builds a Queue with the given storage kind and a discarding
 // logger, with cleanup draining on exit.
 func benchQueue(tb testing.TB, kind StorageKind, b *testing.B) *Queue {
@@ -19,11 +25,17 @@ func benchQueue(tb testing.TB, kind StorageKind, b *testing.B) *Queue {
 		Concurrency: 8,
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
-	if kind == SQLite {
+	switch kind {
+	case SQLite:
 		opts.Path = filepath.Join(b.TempDir(), "bench.db")
+	case Postgres:
+		opts.DSN = benchmarkDSN
 	}
 	q, err := New(opts)
 	if err != nil {
+		if kind == Postgres {
+			b.Skipf("Postgres not available: %v", err)
+		}
 		b.Fatal(err)
 	}
 	b.Cleanup(func() {
@@ -60,6 +72,25 @@ func BenchmarkBrokerThroughput_Memory(b *testing.B) {
 // Throughput benchmarks for SQLite dequeue uses a fresh temp DB per run.
 func BenchmarkBrokerThroughput_SQLite(b *testing.B) {
 	q := benchQueue(b, SQLite, b)
+
+	var processed atomic.Int64
+	q.Handle("q", func(_ context.Context, m Message) error {
+		processed.Add(1)
+		return nil
+	})
+
+	b.ResetTimer()
+	enqueueAndWait(b, q, &processed, b.N)
+	b.StopTimer()
+	b.SetBytes(int64(len("shoebox benchmark payload")))
+}
+
+// BenchmarkBrokerThroughput_Postgres measures end-to-end throughput through
+// the public API against the Postgres backend. Each message round-trips
+// through two committed transactions (enqueue + dequeue/ack), so the number
+// reflects Postgres durability, not the broker. Skips if Postgres is down.
+func BenchmarkBrokerThroughput_Postgres(b *testing.B) {
+	q := benchQueue(b, Postgres, b)
 
 	var processed atomic.Int64
 	q.Handle("q", func(_ context.Context, m Message) error {

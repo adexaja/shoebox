@@ -292,6 +292,8 @@ any setting with CLI flags (they take precedence over the config file).
 > Hardware: Apple M2, darwin/arm64. Go 1.26. Measured 2026-08-11.
 > Run: `go test -bench . -benchmem -run '^$' ./internal/storage/`
 > and `go test -bench 'BrokerThroughput' -benchmem -run '^$' -benchtime 5000x .`
+> Postgres benchmarks need a reachable local Postgres
+> (`host=localhost dbname=shoebox`) and skip when it is down.
 
 ## Storage primitives (raw backend)
 
@@ -302,6 +304,8 @@ any setting with CLI flags (they take precedence over the config file).
 | MemoryDequeue_Batch (depth 10k, dequeue 100 + top-up 100) | ~159 000 | 24 200 | 303 |
 | SQLiteEnqueue (one tx + fsync) | ~356 000 | 2 410 | 35 |
 | SQLiteDequeue (one tx, depth 1000) | ~1 780 000 | 9 300 | 167 |
+| PostgresEnqueue (one round-trip tx) | ~146 000 | 552 | 14 |
+| PostgresDequeue (one tx, depth 1000) | ~781 000 | 2 703 | 56 |
 
 ## Broker throughput (public API, end-to-end)
 
@@ -311,6 +315,7 @@ Concurrency 8, payload 24 bytes, `-benchtime 5000x`.
 |-----------|--------------------:|-----------:|
 | BrokerThroughput_Memory | 2 899 | 8.6 MB/s ≈ ~345 000 msg/s |
 | BrokerThroughput_SQLite | 887 333 | 0.03 MB/s ≈ ~1 100 msg/s |
+| BrokerThroughput_Postgres | 261 273 | 0.10 MB/s ≈ ~3 800 msg/s |
 
 ## Interpretation
 
@@ -327,6 +332,12 @@ Concurrency 8, payload 24 bytes, `-benchtime 5000x`.
   (journal + fsync). ~350µs/op enqueue and ~ 1.78ms/op dequeue are the cost of
   durability, not the broker. Broker Throughput_SQLite (~1 100 msg/s) reflects
   this: every message round-trips through two transactions (enqueue + dequeue/ack).
+- **Postgres is network+commit bound**: a round-trip insert per Enqueue and
+  `FOR UPDATE SKIP LOCKED` per Dequeue. ~146µs/op enqueue, ~781µs/op dequeue,
+  14/56 allocs. It still beats SQLite (~2.3x) here — Postgres's WAL + pooled
+  connections amortize fsync far better than SQLite's per-commit sync.
+  Broker Throughput_Postgres (~3 800 msg/s) is the same two-transaction
+  round-trip as SQLite.
 - **Headline:** with the in-memory backend, the full broker path (enqueue →
   dispatcher → handler → ack) sustains **~345k messages/sec** on a single M2
   core-pair. SQLite trades ~300x throughput for persistence.
