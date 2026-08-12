@@ -12,8 +12,8 @@ func TestLoad_EmptyPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Server.Addr != ":8080" {
-		t.Fatalf("default addr = %q, want :8080", c.Server.Addr)
+	if c.Server.Addr != "127.0.0.1:8080" {
+		t.Fatalf("default addr = %q, want 127.0.0.1:8080", c.Server.Addr)
 	}
 	if c.Storage.Kind != "memory" {
 		t.Fatalf("default kind = %q, want memory", c.Storage.Kind)
@@ -97,7 +97,7 @@ webhooks:
 		t.Fatal(err)
 	}
 	// Server.Addr should default.
-	if c.Server.Addr != ":8080" {
+	if c.Server.Addr != "127.0.0.1:8080" {
 		t.Fatalf("default addr = %q", c.Server.Addr)
 	}
 	// Webhook timeout/content_type should default.

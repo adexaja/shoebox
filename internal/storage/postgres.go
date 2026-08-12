@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -93,11 +94,16 @@ func (p *Postgres) Enqueue(ctx context.Context, queue string, msg Message) error
 		deadAt = msg.DeadAt
 	}
 
+	status := "pending"
+	if strings.HasSuffix(queue, ".dlq") {
+		status = "dead"
+	}
 	_, err = p.pool.Exec(ctx, `INSERT INTO shoebox_messages
 		(id, queue, payload, attempts, max_retries, created_at, scheduled_at, priority, metadata, error, dead_at, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending')`,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 		msg.ID, queue, payload, msg.Attempts, msg.MaxRetries,
 		msg.CreatedAt, msg.ScheduledAt, msg.Priority, meta, msg.Error, deadAt,
+		status,
 	)
 	if err != nil {
 		return fmt.Errorf("shoebox/postgres: enqueue: %w", err)

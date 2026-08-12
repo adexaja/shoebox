@@ -45,6 +45,8 @@ type Manager struct {
 	store storage.Storage
 }
 
+const maxListLimit = 1000
+
 // NewManager creates a DLQ Manager backed by the given storage.
 func NewManager(store storage.Storage) *Manager {
 	return &Manager{store: store}
@@ -60,6 +62,9 @@ func dlqQueue(queue string) string {
 func (m *Manager) List(ctx context.Context, queue string, limit int) ([]Record, error) {
 	if limit <= 0 {
 		limit = 50
+	}
+	if limit > maxListLimit {
+		limit = maxListLimit
 	}
 	msgs, err := m.store.List(ctx, dlqQueue(queue), limit)
 	if err != nil {
@@ -79,7 +84,7 @@ func (m *Manager) Inspect(ctx context.Context, queue, id string) (Record, error)
 	// small by nature (only poison messages land here). A production system
 	// with very large DLQs would add a dedicated GetByID to the storage
 	// interface.
-	msgs, err := m.store.List(ctx, dlqQueue(queue), 10000)
+	msgs, err := m.store.List(ctx, dlqQueue(queue), maxListLimit)
 	if err != nil {
 		return Record{}, fmt.Errorf("dlq: inspect %s/%s: %w", queue, id, err)
 	}
@@ -100,7 +105,7 @@ func (m *Manager) Inspect(ctx context.Context, queue, id string) (Record, error)
 // The original DLQ entry is removed on successful re-enqueue. If the
 // re-enqueue fails the DLQ entry is retained.
 func (m *Manager) Replay(ctx context.Context, queue, id string) error {
-	msgs, err := m.store.List(ctx, dlqQueue(queue), 10000)
+	msgs, err := m.store.List(ctx, dlqQueue(queue), maxListLimit)
 	if err != nil {
 		return fmt.Errorf("dlq: replay %s/%s: %w", queue, id, err)
 	}

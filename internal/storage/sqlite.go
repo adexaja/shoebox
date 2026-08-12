@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver; registers as "sqlite"
@@ -80,14 +81,18 @@ func (s *SQLite) Enqueue(ctx context.Context, queue string, msg Message) error {
 	if payload == nil {
 		payload = []byte{}
 	}
+	status := "pending"
+	if strings.HasSuffix(queue, ".dlq") {
+		status = "dead"
+	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO shoebox_messages
 		(id, queue, payload, attempts, max_retries, created_at, scheduled_at, priority, metadata, error, dead_at, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		msg.ID, queue, payload, msg.Attempts, msg.MaxRetries,
 		msg.CreatedAt.Format(time.RFC3339Nano),
 		msg.ScheduledAt.Format(time.RFC3339Nano),
 		msg.Priority,
-		string(meta), msg.Error, tsOrEmpty(msg.DeadAt),
+		string(meta), msg.Error, tsOrEmpty(msg.DeadAt), status,
 	)
 	if err != nil {
 		return fmt.Errorf("shoebox/sqlite: enqueue: %w", err)

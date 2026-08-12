@@ -73,9 +73,8 @@ func TestPause_Idempotent(t *testing.T) {
 }
 
 // TestDrain_ProcessesRemainingThenStops verifies that Drain processes all
-// remaining messages and then stops the queue's dispatcher. New messages
-// enqueued after Drain should not be processed (until the handler is
-// re-registered or Resume is called).
+// remaining messages and stops the queue's dispatcher, while Resume starts it
+// again for messages enqueued afterward.
 func TestDrain_ProcessesRemainingThenStops(t *testing.T) {
 	q := newTestQueue(t)
 	var count int64
@@ -103,14 +102,19 @@ func TestDrain_ProcessesRemainingThenStops(t *testing.T) {
 		t.Fatalf("processed %d after drain, want 3", got)
 	}
 
-	// Enqueue another message — it should NOT be processed because the
-	// dispatcher for this queue has exited.
+	// Enqueue another message while drained. It remains pending until Resume.
 	if err := q.Enqueue("jobs", []byte("after-drain")); err != nil {
 		t.Fatalf("Enqueue after drain: %v", err)
 	}
 	time.Sleep(300 * time.Millisecond)
 	if got := atomic.LoadInt64(&count); got != 3 {
-		t.Fatalf("processed %d after post-drain enqueue, want 3 (dispatcher should have stopped)", got)
+		t.Fatalf("processed %d while drained, want 3", got)
+	}
+
+	q.Resume("jobs")
+	waitFor(t, func() bool { return atomic.LoadInt64(&count) == 4 }, 3*time.Second)
+	if got := atomic.LoadInt64(&count); got != 4 {
+		t.Fatalf("processed %d after resume, want 4", got)
 	}
 }
 

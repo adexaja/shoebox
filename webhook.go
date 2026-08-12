@@ -126,12 +126,16 @@ func newWebhookClient(timeout time.Duration, maxIdle int) *http.Client {
 	if maxIdle <= 0 {
 		maxIdle = 16
 	}
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.MaxIdleConnsPerHost = maxIdle
-	tr.MaxIdleConns = maxIdle
+	var transport http.RoundTripper = http.DefaultTransport
+	if base, ok := http.DefaultTransport.(*http.Transport); ok && base != nil {
+		tr := base.Clone()
+		tr.MaxIdleConnsPerHost = maxIdle
+		tr.MaxIdleConns = maxIdle
+		transport = tr
+	}
 	return &http.Client{
 		Timeout:   timeout,
-		Transport: tr,
+		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

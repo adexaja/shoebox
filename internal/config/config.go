@@ -33,17 +33,17 @@ import (
 
 // Config is the top-level shoeboxd configuration.
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Storage  StorageConfig  `yaml:"storage"`
+	Server   ServerConfig             `yaml:"server"`
+	Storage  StorageConfig            `yaml:"storage"`
 	Webhooks map[string]WebhookConfig `yaml:"webhooks"`
 }
 
 // ServerConfig holds HTTP server settings.
 type ServerConfig struct {
 	Addr              string `yaml:"addr"`
-	AuthToken         string `yaml:"auth_token"`          // API token (X-API-Key / Bearer)
-	DashboardUser     string `yaml:"dashboard_user"`      // Basic Auth username for dashboard
-	DashboardPassword string `yaml:"dashboard_password"`  // Basic Auth password for dashboard
+	AuthToken         string `yaml:"auth_token"`         // API token (X-API-Key / Bearer)
+	DashboardUser     string `yaml:"dashboard_user"`     // Basic Auth username for dashboard
+	DashboardPassword string `yaml:"dashboard_password"` // Basic Auth password for dashboard
 }
 
 // StorageConfig selects and configures the storage backend.
@@ -64,7 +64,7 @@ type WebhookConfig struct {
 // defaults applies sensible defaults to an empty config.
 func (c *Config) defaults() {
 	if c.Server.Addr == "" {
-		c.Server.Addr = ":8080"
+		c.Server.Addr = "127.0.0.1:8080"
 	}
 	if c.Storage.Kind == "" {
 		c.Storage.Kind = "memory"
