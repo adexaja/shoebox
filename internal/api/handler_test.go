@@ -117,6 +117,18 @@ func TestEnqueue_EmptyPayload(t *testing.T) {
 	}
 }
 
+func TestEnqueue_RejectsReservedDLQName(t *testing.T) {
+	h, _ := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodPost, "/queues/orders.dlq/messages", strings.NewReader(`{"payload":"x"}`))
+	req.SetPathValue("name", "orders.dlq")
+	w := httptest.NewRecorder()
+
+	h.enqueue(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
 func TestEnqueue_InvalidJSON(t *testing.T) {
 	h, _ := newTestHandler(t)
 

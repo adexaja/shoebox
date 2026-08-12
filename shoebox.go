@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/adexaja/shoebox/internal/broker"
+	"github.com/adexaja/shoebox/internal/naming"
 	"github.com/adexaja/shoebox/internal/retry"
 	"github.com/adexaja/shoebox/internal/storage"
 	"github.com/prometheus/client_golang/prometheus"
@@ -109,7 +109,7 @@ func (q *Queue) Handle(queue string, h HandlerFunc, opts ...HandlerOptions) {
 // Per ADR 0002 (fire-and-forget), Enqueue does not return a delivery
 // promise; use Shutdown to wait for in-flight messages.
 func (q *Queue) Enqueue(queue string, payload []byte, opts ...EnqueueOpt) error {
-	if !validQueueName(queue) {
+	if !naming.ValidQueueName(queue) {
 		return fmt.Errorf("shoebox: invalid queue name %q", queue)
 	}
 	eo := EnqueueOptions{}
@@ -123,19 +123,6 @@ func (q *Queue) Enqueue(queue string, payload []byte, opts ...EnqueueOpt) error 
 		DedupeKey: eo.DedupeKey,
 		Metadata:  eo.Metadata,
 	})
-}
-
-func validQueueName(name string) bool {
-	if name == "" || len(name) > 128 || strings.HasSuffix(name, ".dlq") {
-		return false
-	}
-	for _, r := range name {
-		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') &&
-			(r < '0' || r > '9') && r != '.' && r != '-' && r != '_' {
-			return false
-		}
-	}
-	return true
 }
 
 // Use registers one or more middleware. Middleware applies in the order

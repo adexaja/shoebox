@@ -148,6 +148,13 @@ func TestSQLiteBrokerPersistsDeadLetter(t *testing.T) {
 	}
 }
 
+func TestEnqueueRejectsReservedDLQName(t *testing.T) {
+	q := newTestQueue(t)
+	if err := q.Enqueue("orders.dlq", []byte("payload")); err == nil {
+		t.Fatal("Enqueue accepted reserved .dlq queue name")
+	}
+}
+
 // TestMiddleware_Ordering verifies that middleware applies in registration
 // order: the first Use argument is outermost. We verify this by recording
 // the order in which middleware "enters" relative to the handler.

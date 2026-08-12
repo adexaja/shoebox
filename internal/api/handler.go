@@ -19,10 +19,10 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/adexaja/shoebox/internal/dlq"
+	"github.com/adexaja/shoebox/internal/naming"
 	"github.com/adexaja/shoebox/internal/storage"
 )
 
@@ -73,23 +73,10 @@ const maxPayloadSize = 1 << 20 // 1 MB
 
 const maxDLQLimit = 1000
 
-func validQueueName(name string) bool {
-	if len(name) == 0 || len(name) > 128 || strings.HasSuffix(name, ".dlq") {
-		return false
-	}
-	for _, r := range name {
-		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') &&
-			(r < '0' || r > '9') && r != '.' && r != '-' && r != '_' {
-			return false
-		}
-	}
-	return true
-}
-
 // enqueue handles POST /queues/{name}/messages.
 func (h *Handler) enqueue(w http.ResponseWriter, r *http.Request) {
 	queue := r.PathValue("name")
-	if !validQueueName(queue) {
+	if !naming.ValidQueueName(queue) {
 		writeError(w, http.StatusBadRequest, "invalid queue name")
 		return
 	}
