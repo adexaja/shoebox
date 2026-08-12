@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/adexaja/shoebox/internal/retry"
 	"github.com/adexaja/shoebox/internal/storage"
 )
 
@@ -115,6 +116,46 @@ func TestShutdown_DrainFollowupDuringDrain(t *testing.T) {
 
 	if got := processed.Load(); got != 2 {
 		t.Errorf("expected seed + follow-up processed (2), got %d — follow-up orphaned", got)
+	}
+}
+
+// TestShutdown_DrainsScheduledRetry verifies that Shutdown waits for a retry
+// whose backoff has not elapsed yet. Dequeue returns ErrEmpty while the retry
+// is scheduled in the future, but the message is still pending.
+func TestShutdown_DrainsScheduledRetry(t *testing.T) {
+	store := storage.NewMemory()
+	b := quietBroker(t, store, 1)
+
+	var attempts atomic.Int64
+	b.Register("jobs", func(_ context.Context, m storage.Message) error {
+		if attempts.Add(1) == 1 {
+			return errors.New("transient")
+		}
+		return nil
+	}, HandlerOptions{
+		MaxRetries: 1,
+		Backoff:    retry.Constant(50 * time.Millisecond),
+	})
+
+	if err := b.Enqueue(context.Background(), "jobs", []byte("retry-me"), EnqueueOpts{}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := b.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("handler attempts = %d, want 2", got)
+	}
+	stats, err := store.Stats(context.Background(), "jobs")
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if stats.Processed != 1 || stats.Retries != 1 || stats.Depth != 0 {
+		t.Fatalf("stats = %+v, want processed=1 retries=1 depth=0", stats)
 	}
 }
 

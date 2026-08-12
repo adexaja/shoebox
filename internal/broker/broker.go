@@ -267,23 +267,22 @@ func (b *Broker) dispatch(queue string) {
 		}
 
 		if len(msgs) == 0 {
-			// Nothing ready right now. Either idle, draining, or per-queue drain.
+			// Nothing is ready right now. A queue can still contain messages
+			// scheduled for the future (notably retry messages), so only finish
+			// draining when the storage reports no pending messages at all.
 			select {
 			case <-b.abortCh:
 				return
 			default:
 			}
 
-			if b.draining() && b.quiescent(queue) {
-				// Authoritative drain-complete for this queue: the queue is
-				// empty AND no worker is in flight, so nothing can re-enqueue
-				// after we exit.
+			if b.draining() && b.drainComplete(queue) {
 				return
 			}
 
 			// Per-queue drain (Drain method): same quiescence condition,
 			// but only stops THIS queue's dispatcher, not the whole broker.
-			if b.isQueueDraining(queue) && b.quiescent(queue) {
+			if b.isQueueDraining(queue) && b.drainComplete(queue) {
 				b.signalDrainDone(queue)
 				return
 			}
@@ -316,6 +315,23 @@ func (b *Broker) dispatch(queue string) {
 			}()
 		}
 	}
+}
+
+// drainComplete reports whether a queue has no pending messages and no
+// in-flight workers. Dequeue returning ErrEmpty only means that no message is
+// due now; scheduled retries may still be pending and must be allowed to run.
+func (b *Broker) drainComplete(queue string) bool {
+	if !b.quiescent(queue) {
+		return false
+	}
+
+	stats, err := b.store.Stats(b.storeCtx(), queue)
+	if err != nil {
+		b.logger.ErrorContext(b.storeCtx(), "shoebox: drain stats failed",
+			slog.String("queue", queue), slog.Any("err", err))
+		return false
+	}
+	return stats.Depth == 0
 }
 
 // draining reports whether a graceful drain has been requested.
