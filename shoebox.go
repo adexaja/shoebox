@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/adexaja/shoebox/internal/broker"
@@ -19,9 +20,9 @@ import (
 
 // Queue is the public-facing message queue. It is safe for concurrent use.
 type Queue struct {
-	b          *broker.Broker
-	metrics    *Metrics
-	registry   *prometheus.Registry
+	b        *broker.Broker
+	metrics  *Metrics
+	registry *prometheus.Registry
 }
 
 // New constructs a Queue backed by the storage kind selected in opts.
@@ -108,6 +109,9 @@ func (q *Queue) Handle(queue string, h HandlerFunc, opts ...HandlerOptions) {
 // Per ADR 0002 (fire-and-forget), Enqueue does not return a delivery
 // promise; use Shutdown to wait for in-flight messages.
 func (q *Queue) Enqueue(queue string, payload []byte, opts ...EnqueueOpt) error {
+	if !validQueueName(queue) {
+		return fmt.Errorf("shoebox: invalid queue name %q", queue)
+	}
 	eo := EnqueueOptions{}
 	for _, opt := range opts {
 		opt(&eo)
@@ -119,6 +123,19 @@ func (q *Queue) Enqueue(queue string, payload []byte, opts ...EnqueueOpt) error 
 		DedupeKey: eo.DedupeKey,
 		Metadata:  eo.Metadata,
 	})
+}
+
+func validQueueName(name string) bool {
+	if name == "" || len(name) > 128 || strings.HasSuffix(name, ".dlq") {
+		return false
+	}
+	for _, r := range name {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') &&
+			(r < '0' || r > '9') && r != '.' && r != '-' && r != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 // Use registers one or more middleware. Middleware applies in the order

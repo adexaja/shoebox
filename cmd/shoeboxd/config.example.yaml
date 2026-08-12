@@ -6,10 +6,10 @@
 # Webhooks can ONLY be declared here (not via flags) — one entry per queue.
 
 server:
-  addr: ":8080"
-  auth_token: ""           # API token (X-API-Key / Bearer); leave empty to disable API auth
-  dashboard_user: "admin"  # Basic Auth username for the web dashboard; leave empty to disable
-  dashboard_password: ""   # Basic Auth password for the web dashboard
+  addr: "127.0.0.1:8080"
+  auth_token: "change-me-api-token"  # API token (X-API-Key / Bearer)
+  dashboard_user: "admin"            # Basic Auth username for the web dashboard
+  dashboard_password: "change-me-dashboard-password"
 
 storage:
   kind: memory             # memory | sqlite | postgres

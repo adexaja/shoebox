@@ -109,6 +109,45 @@ func TestPanicRecovery(t *testing.T) {
 	}, 3*time.Second)
 }
 
+func TestSQLiteBrokerPersistsDeadLetter(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	q, err := New(Options{
+		Storage:         SQLite,
+		Path:            t.TempDir() + "/shoebox.db",
+		Concurrency:     1,
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MetricsRegistry: reg,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = q.Shutdown(ctx)
+	}()
+
+	q.Handle("orders", func(context.Context, Message) error {
+		return errors.New("poison")
+	}, HandlerOptions{MaxRetries: 0})
+	if err := q.Enqueue("orders", []byte("payload")); err != nil {
+		t.Fatal(err)
+	}
+
+	waitFor(t, func() bool {
+		stats, err := q.Stats(context.Background(), "orders")
+		return err == nil && stats.Dead == 1
+	}, 3*time.Second)
+
+	dead, err := q.Store().List(context.Background(), "orders.dlq", 10)
+	if err != nil {
+		t.Fatalf("List DLQ: %v", err)
+	}
+	if len(dead) != 1 || string(dead[0].Payload) != "payload" {
+		t.Fatalf("DLQ = %+v, want one payload", dead)
+	}
+}
+
 // TestMiddleware_Ordering verifies that middleware applies in registration
 // order: the first Use argument is outermost. We verify this by recording
 // the order in which middleware "enters" relative to the handler.

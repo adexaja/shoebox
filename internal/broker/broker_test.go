@@ -184,11 +184,10 @@ func TestShutdown_ClosesStoreOnce(t *testing.T) {
 	}
 }
 
-// TestShutdown_ForceAbortStillClosesStore is the regression test for the
-// force-abort branch of E1-CONC-2. When Shutdown's context expires before
-// in-flight workers finish, the broker closes abortCh, but it MUST still wait
-// for the workers (so it never closes the store under a running handler) and
-// MUST still close the store exactly once before returning.
+// TestShutdown_ForceAbortStillClosesStore verifies that when Shutdown's
+// context expires before in-flight workers finish, the broker returns without
+// closing the store underneath the worker, then closes it exactly once after
+// the worker exits.
 func TestShutdown_ForceAbortStillClosesStore(t *testing.T) {
 	store := &closeCounter{Storage: storage.NewMemory(), closes: &atomic.Int64{}}
 	b := quietBroker(t, store, 1)
@@ -223,8 +222,12 @@ func TestShutdown_ForceAbortStillClosesStore(t *testing.T) {
 		t.Fatal("in-flight worker was not awaited after force-abort (CONC-2)")
 	}
 
+	deadline := time.Now().Add(time.Second)
+	for store.closes.Load() != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
 	if got := store.closes.Load(); got != 1 {
-		t.Errorf("after force-abort, store closed %d times, want 1 (CONC-2/5)", got)
+		t.Errorf("after worker exit, store closed %d times, want 1 (CONC-2/5)", got)
 	}
 }
 

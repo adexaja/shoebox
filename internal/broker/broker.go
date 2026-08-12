@@ -31,19 +31,20 @@ type Broker struct {
 	mwMu sync.RWMutex
 	mw   []Middleware
 
-	hMu       sync.RWMutex
-	handlers  map[string]*handler
-	dispatchC map[string]chan struct{} // one wakeup channel per queue
-	inflight  map[string]*atomic.Int64 // per-queue in-flight worker count (drain quiescence)
-	workerMu  sync.Mutex               // protects the inflight map values during access
+	hMu         sync.RWMutex
+	handlers    map[string]*handler
+	dispatchC   map[string]chan struct{} // one wakeup channel per queue
+	dispatching map[string]bool
+	inflight    map[string]*atomic.Int64 // per-queue in-flight worker count (drain quiescence)
+	workerMu    sync.Mutex               // protects the inflight map values during access
 
 	// stopCh  closes to initiate a graceful drain: dispatchers drain their
 	//         queue to quiescence (including follow-up enqueues) then exit.
 	// abortCh closes to force-abort: dispatchers exit immediately, leaving
 	//         in-flight workers to finish on their own. Used when Shutdown's
 	//         ctx expires.
-	stopOnce sync.Once
-	stopCh   chan struct{}
+	stopOnce  sync.Once
+	stopCh    chan struct{}
 	abortOnce sync.Once
 	abortCh   chan struct{}
 	wg        sync.WaitGroup // counts dispatchers + workers; Shutdown waits on this
@@ -54,8 +55,8 @@ type Broker struct {
 	// shutdownCtx is the context Shutdown hands to all store calls so a
 	// blocking backend can observe cancellation. Defaults to Background until
 	// Shutdown replaces it.
-	shutdownCtx    context.Context
-	shutdownCtxMu  sync.RWMutex
+	shutdownCtx   context.Context
+	shutdownCtxMu sync.RWMutex
 
 	shuttingDown atomic.Bool
 
@@ -91,6 +92,7 @@ func New(opts Options) *Broker {
 		logger:      opts.Logger,
 		handlers:    make(map[string]*handler),
 		dispatchC:   make(map[string]chan struct{}),
+		dispatching: make(map[string]bool),
 		inflight:    make(map[string]*atomic.Int64),
 		stopCh:      make(chan struct{}),
 		abortCh:     make(chan struct{}),
@@ -128,8 +130,8 @@ func (b *Broker) Register(queue string, fn HandlerFunc, opts HandlerOptions) {
 	b.mwMu.RUnlock()
 
 	h := &handler{
-		fn:   fn,
-		opts: opts,
+		fn:    fn,
+		opts:  opts,
 		chain: chain(mw, fn),
 	}
 
@@ -141,6 +143,9 @@ func (b *Broker) Register(queue string, fn HandlerFunc, opts HandlerOptions) {
 		// the shared storage.
 		b.dispatchC[queue] = make(chan struct{}, 1)
 		b.inflight[queue] = &atomic.Int64{}
+	}
+	if !b.dispatching[queue] {
+		b.dispatching[queue] = true
 		b.wg.Add(1)
 		go b.dispatch(queue)
 	}
@@ -229,6 +234,11 @@ type EnqueueOpts struct {
 //     the global wg (CONC-2: one unified exit path).
 func (b *Broker) dispatch(queue string) {
 	defer b.wg.Done()
+	defer func() {
+		b.hMu.Lock()
+		b.dispatching[queue] = false
+		b.hMu.Unlock()
+	}()
 
 	sem := make(chan struct{}, b.concurrency)
 	for {
@@ -419,19 +429,24 @@ func (b *Broker) handlerCtx(h *handler) (context.Context, context.CancelFunc) {
 // the last handler error, the retry count, and a timestamp (E2-S3).
 func (b *Broker) toDeadLetter(queue string, msg storage.Message, handlerErr error) {
 	dlq := queue + ".dlq"
+	sourceID := msg.ID
 	msg.Queue = dlq
 	msg.ScheduledAt = time.Now()
 	msg.DeadAt = time.Now()
 	if handlerErr != nil {
 		msg.Error = handlerErr.Error()
 	}
+	// Persistent backends use a globally unique message ID. Give the DLQ
+	// record its own ID so it can coexist with the source row, which is
+	// marked dead below. Replay will remove this DLQ row before requeueing.
+	msg.ID = storage.NewMessageID()
 	if err := b.store.Enqueue(b.storeCtx(), dlq, msg); err != nil {
 		b.logger.ErrorContext(b.storeCtx(), "shoebox: dlq enqueue failed",
 			slog.String("queue", queue), slog.String("id", msg.ID), slog.Any("err", err))
 	}
-	if err := b.store.Dead(b.storeCtx(), queue, msg.ID, handlerErr); err != nil {
+	if err := b.store.Dead(b.storeCtx(), queue, sourceID, handlerErr); err != nil {
 		b.logger.ErrorContext(b.storeCtx(), "shoebox: dead-letter stat failed",
-			slog.String("queue", queue), slog.String("id", msg.ID), slog.Any("err", err))
+			slog.String("queue", queue), slog.String("id", sourceID), slog.Any("err", err))
 	}
 }
 
@@ -483,10 +498,13 @@ func (b *Broker) Shutdown(ctx context.Context) error {
 		// own (wg covers them). We MUST still wait for wg so we don't close
 		// the store under a running worker.
 		b.abortOnce.Do(func() { close(b.abortCh) })
-		// Give workers a bounded chance to notice ctx cancellation through
-		// handlerCtx; then wait regardless.
-		<-done
-		b.closeOnce.Do(func() { _ = b.store.Close() })
+		// Do not block past the caller's deadline on a non-cooperative handler.
+		// The store remains open until all workers finish, so it is never closed
+		// underneath a handler still using it.
+		go func() {
+			<-done
+			b.closeOnce.Do(func() { _ = b.store.Close() })
+		}()
 		return ctx.Err()
 	}
 }
@@ -547,6 +565,18 @@ func (b *Broker) Pause(queue string) {
 // handler's dispatcher. Resume is idempotent.
 func (b *Broker) Resume(queue string) {
 	b.pausedFlag(queue).Store(false)
+	b.qDrainingMu.Lock()
+	if flag, ok := b.qDraining[queue]; ok {
+		flag.Store(false)
+	}
+	b.qDrainingMu.Unlock()
+	b.hMu.Lock()
+	if _, ok := b.handlers[queue]; ok && !b.dispatching[queue] && !b.closed.Load() {
+		b.dispatching[queue] = true
+		b.wg.Add(1)
+		go b.dispatch(queue)
+	}
+	b.hMu.Unlock()
 	// Nudge the dispatcher in case it's sleeping in the poll loop.
 	b.hMu.RLock()
 	wake, ok := b.dispatchC[queue]

@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/adexaja/shoebox/internal/dlq"
@@ -28,9 +29,9 @@ import (
 // Handler holds the dependencies shared by all HTTP endpoints: the storage
 // backend (for enqueue/dequeue/ack/stats) and the DLQ manager (for list/replay).
 type Handler struct {
-	store   storage.Storage
-	dlq     *dlq.Manager
-	logger  *slog.Logger
+	store  storage.Storage
+	dlq    *dlq.Manager
+	logger *slog.Logger
 }
 
 // NewHandler creates an API Handler.
@@ -57,7 +58,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 // require base64 encoding); it is converted to []byte internally.
 type enqueueRequest struct {
 	Payload  string            `json:"payload"`
-	Delay    string            `json:"delay,omitempty"`     // e.g. "5s", "1m"
+	Delay    string            `json:"delay,omitempty"` // e.g. "5s", "1m"
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
@@ -70,11 +71,26 @@ type enqueueResponse struct {
 // exhaustion from oversized payloads. 1 MB is generous for a single message.
 const maxPayloadSize = 1 << 20 // 1 MB
 
+const maxDLQLimit = 1000
+
+func validQueueName(name string) bool {
+	if len(name) == 0 || len(name) > 128 || strings.HasSuffix(name, ".dlq") {
+		return false
+	}
+	for _, r := range name {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') &&
+			(r < '0' || r > '9') && r != '.' && r != '-' && r != '_' {
+			return false
+		}
+	}
+	return true
+}
+
 // enqueue handles POST /queues/{name}/messages.
 func (h *Handler) enqueue(w http.ResponseWriter, r *http.Request) {
 	queue := r.PathValue("name")
-	if queue == "" {
-		writeError(w, http.StatusBadRequest, "missing queue name")
+	if !validQueueName(queue) {
+		writeError(w, http.StatusBadRequest, "invalid queue name")
 		return
 	}
 
@@ -170,6 +186,9 @@ func (h *Handler) listDLQ(w http.ResponseWriter, r *http.Request) {
 	limit := 50
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
+			if parsed > maxDLQLimit {
+				parsed = maxDLQLimit
+			}
 			limit = parsed
 		}
 	}
