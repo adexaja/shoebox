@@ -223,8 +223,6 @@ library mode:
 q.Handle("orders", shoebox.WebhookHandler("https://hooks.example.com/orders"))
 ```
 
-## Current status
+## License
 
-The core broker, all three storage backends, retries, DLQ handling,
-observability, middleware, `shoeboxd`, webhooks, delayed messages,
-deduplication, priority, pause, resume, and drain are implemented.
+MIT.
