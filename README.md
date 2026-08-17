@@ -121,6 +121,23 @@ q.Enqueue("orders", payload, shoebox.DedupeKey("order-123")) // dropped
 Dedupe state is held in the broker, not in storage. It is scoped per queue and
 does not survive a restart.
 
+The default policy is `UnboundedTTL`, which preserves all live deduplication
+keys until their five-minute TTL expires. To bound memory, select `BoundedLRU`:
+
+```go
+broker, err := shoebox.New(shoebox.Options{
+	Dedupe: shoebox.DedupeOptions{
+		Policy:   shoebox.DedupePolicyBoundedLRU,
+		Capacity: 100_000,
+	},
+})
+```
+
+`BoundedLRU` limits memory usage, but a deduplication key may be evicted before
+its TTL expires. A duplicate message may therefore be accepted again after
+capacity-based eviction. Deduplication is best-effort and in-memory; it is not
+durable exactly-once delivery.
+
 ## Shutdown and queue control
 
 `Shutdown(ctx)` waits for in-flight handlers, including follow-up messages they

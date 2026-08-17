@@ -17,9 +17,20 @@ import (
 
 // Options configures a Broker.
 type Options struct {
-	Storage     storage.Storage
-	Concurrency int
-	Logger      *slog.Logger
+	Storage       storage.Storage
+	Concurrency   int
+	Logger        *slog.Logger
+	Dedupe        DedupeOptions
+	DedupeMetrics DedupeMetrics
+}
+
+// DedupeMetrics receives optional deduplication instrumentation from the
+// public metrics layer without coupling the broker to a metrics dependency.
+type DedupeMetrics interface {
+	DedupeHit(queue string)
+	DedupeMiss(queue string)
+	DedupeEviction()
+	DedupeEntries(entries int)
 }
 
 // Broker is the dispatch engine. One per Queue. Safe for concurrent use.
@@ -62,8 +73,9 @@ type Broker struct {
 
 	// dedupe suppresses duplicate enqueues within a per-key TTL window
 	// (ADR 0006 §Deduplication).
-	dedupe    *dedupeTable
-	dedupeTTL time.Duration
+	dedupe        dedupeStore
+	dedupeMetrics DedupeMetrics
+	dedupeTTL     time.Duration
 
 	// paused holds per-queue atomic flags. When set, the dispatcher skips
 	// dequeuing that queue so messages accumulate until Resume.
@@ -86,22 +98,33 @@ func New(opts Options) *Broker {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
+	dedupe, err := newDedupeStore(opts.Dedupe, func() {
+		if opts.DedupeMetrics != nil {
+			opts.DedupeMetrics.DedupeEviction()
+		}
+	})
+	if err != nil {
+		// Public construction validates this before calling broker.New. Keep
+		// the internal constructor backward-compatible for existing callers.
+		dedupe = newTTLDedupeStore()
+	}
 	return &Broker{
-		store:       opts.Storage,
-		concurrency: opts.Concurrency,
-		logger:      opts.Logger,
-		handlers:    make(map[string]*handler),
-		dispatchC:   make(map[string]chan struct{}),
-		dispatching: make(map[string]bool),
-		inflight:    make(map[string]*atomic.Int64),
-		stopCh:      make(chan struct{}),
-		abortCh:     make(chan struct{}),
-		shutdownCtx: context.Background(),
-		dedupe:      newDedupeTable(),
-		dedupeTTL:   DefaultDedupeTTL,
-		paused:      make(map[string]*atomic.Bool),
-		qDraining:   make(map[string]*atomic.Bool),
-		drainDone:   make(map[string]chan struct{}),
+		store:         opts.Storage,
+		concurrency:   opts.Concurrency,
+		logger:        opts.Logger,
+		handlers:      make(map[string]*handler),
+		dispatchC:     make(map[string]chan struct{}),
+		dispatching:   make(map[string]bool),
+		inflight:      make(map[string]*atomic.Int64),
+		stopCh:        make(chan struct{}),
+		abortCh:       make(chan struct{}),
+		shutdownCtx:   context.Background(),
+		dedupe:        dedupe,
+		dedupeMetrics: opts.DedupeMetrics,
+		dedupeTTL:     DefaultDedupeTTL,
+		paused:        make(map[string]*atomic.Bool),
+		qDraining:     make(map[string]*atomic.Bool),
+		drainDone:     make(map[string]chan struct{}),
 	}
 }
 
@@ -170,8 +193,16 @@ func (b *Broker) Enqueue(ctx context.Context, queue string, payload []byte, opts
 	// for this queue, silently suppress this enqueue (no error, no store
 	// write). The caller's contract is fire-and-forget, so returning nil is
 	// the right signal — the message was "accepted" even if deduplicated.
-	if opts.DedupeKey != "" && b.dedupe.checkAndAdd(queue, opts.DedupeKey, b.dedupeTTL) {
+	if opts.DedupeKey != "" && b.dedupe.SeenOrAdd(queue+":"+opts.DedupeKey, b.dedupeTTL) {
+		if b.dedupeMetrics != nil {
+			b.dedupeMetrics.DedupeHit(queue)
+			b.dedupeMetrics.DedupeEntries(b.dedupe.Len())
+		}
 		return nil
+	}
+	if opts.DedupeKey != "" && b.dedupeMetrics != nil {
+		b.dedupeMetrics.DedupeMiss(queue)
+		b.dedupeMetrics.DedupeEntries(b.dedupe.Len())
 	}
 
 	now := time.Now()
@@ -657,7 +688,9 @@ func (b *Broker) Drain(ctx context.Context, queue string) error {
 	}
 
 	// Cleanup: purge dedupe entries for this queue to free memory.
-	b.dedupe.purge(queue)
+	if purger, ok := b.dedupe.(queueDedupePurger); ok {
+		purger.purgeQueue(queue)
+	}
 	return nil
 }
 

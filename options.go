@@ -42,6 +42,24 @@ type Options struct {
 	// Set this to a custom registry when running multiple shoebox instances
 	// in the same process or to isolate metrics in tests.
 	MetricsRegistry *prometheus.Registry
+
+	// Dedupe selects the in-memory deduplication policy. An empty policy uses
+	// the backward-compatible unbounded TTL store.
+	Dedupe DedupeOptions
+}
+
+// DedupePolicy selects how in-memory deduplication state is retained.
+type DedupePolicy string
+
+const (
+	DedupePolicyUnboundedTTL DedupePolicy = "unbounded_ttl"
+	DedupePolicyBoundedLRU   DedupePolicy = "bounded_lru"
+)
+
+// DedupeOptions configures in-memory message deduplication.
+type DedupeOptions struct {
+	Policy   DedupePolicy
+	Capacity int
 }
 
 // HandlerOptions configures a single registered handler.
