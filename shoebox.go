@@ -36,21 +36,30 @@ func New(opts Options) (*Queue, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
+	if opts.Dedupe.Policy != "" && opts.Dedupe.Policy != DedupePolicyUnboundedTTL && opts.Dedupe.Policy != DedupePolicyBoundedLRU {
+		return nil, fmt.Errorf("shoebox: unsupported dedupe policy %q", opts.Dedupe.Policy)
+	}
 
 	store, err := buildStorage(context.Background(), opts)
 	if err != nil {
 		return nil, err
 	}
 
+	metrics := NewMetrics("", opts.MetricsRegistry)
 	q := &Queue{
 		b: broker.New(broker.Options{
 			Storage:     store,
 			Concurrency: opts.Concurrency,
 			Logger:      opts.Logger,
+			Dedupe: broker.DedupeOptions{
+				Policy:   broker.DedupePolicy(opts.Dedupe.Policy),
+				Capacity: opts.Dedupe.Capacity,
+			},
+			DedupeMetrics: metrics,
 		}),
+		metrics:  metrics,
 		registry: opts.MetricsRegistry,
 	}
-	q.metrics = NewMetrics("", opts.MetricsRegistry)
 	return q, nil
 }
 
