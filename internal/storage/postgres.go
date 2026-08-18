@@ -76,7 +76,7 @@ func NewPostgres(ctx context.Context, dsn string, schemas ...string) (*Postgres,
 		return nil, fmt.Errorf("shoebox/postgres: ping: %w", err)
 	}
 
-	if _, err := pool.Exec(ctx, postgresSchema); err != nil {
+	if err := initPostgresSchema(ctx, pool); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("shoebox/postgres: init schema: %w", err)
 	}
@@ -98,6 +98,36 @@ func quotePostgresIdentifier(identifier string) (string, error) {
 		return "", errors.New("must be a non-empty identifier without NUL bytes")
 	}
 	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`, nil
+}
+
+// initPostgresSchema serialises schema creation across all shoebox instances
+// that share a database. CREATE TABLE IF NOT EXISTS is not sufficient here:
+// concurrent CREATE TABLE statements can race while PostgreSQL creates the
+// table's implicit composite type, resulting in a duplicate pg_type entry.
+//
+// The advisory lock is transaction-scoped and the schema is executed on the
+// same acquired connection, so the lock remains held for the whole DDL batch.
+func initPostgresSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended('shoebox:schema:init', 0))`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, postgresSchema); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // Enqueue persists a new message with status 'pending'.
