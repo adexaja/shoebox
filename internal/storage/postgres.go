@@ -23,7 +23,8 @@ import (
 // and TIMESTAMPTZ. The status lifecycle (pending → processing → deleted)
 // provides crash recovery via Reclaim, identical to SQLite.
 type Postgres struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	schema string
 }
 
 //go:embed schema_postgres.sql
@@ -31,9 +32,18 @@ var postgresSchema string
 
 // NewPostgres opens a connection pool to the Postgres database at dsn,
 // initialises the schema, and reclaims stale 'processing' rows from any
-// previous crash (E2-S1). The dsn should be a standard Postgres connection
-// string, e.g. "[REDACTED:connection_string]localhost:5432/shoebox?sslmode=disable".
-func NewPostgres(ctx context.Context, dsn string) (*Postgres, error) {
+// previous crash (E2-S1). The optional schema defaults to "public". The dsn
+// should be a standard Postgres connection string.
+func NewPostgres(ctx context.Context, dsn string, schemas ...string) (*Postgres, error) {
+	schema := "public"
+	if len(schemas) > 0 && schemas[0] != "" {
+		schema = schemas[0]
+	}
+	quotedSchema, err := quotePostgresIdentifier(schema)
+	if err != nil {
+		return nil, fmt.Errorf("shoebox/postgres: schema: %w", err)
+	}
+
 	config, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("shoebox/postgres: parse dsn: %w", err)
@@ -46,6 +56,15 @@ func NewPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 	config.MinConns = 2
 	config.MaxConnLifetime = 30 * time.Minute
 	config.MaxConnIdleTime = 5 * time.Minute
+	// A pool can create connections after startup, so configure the schema on
+	// every connection rather than changing only the connection used below.
+	config.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		if _, err := conn.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS "+quotedSchema); err != nil {
+			return err
+		}
+		_, err := conn.Exec(ctx, "SET search_path TO "+quotedSchema)
+		return err
+	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
@@ -69,7 +88,16 @@ func NewPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 		return nil, fmt.Errorf("shoebox/postgres: reclaim: %w", err)
 	}
 
-	return &Postgres{pool: pool}, nil
+	return &Postgres{pool: pool, schema: schema}, nil
+}
+
+// quotePostgresIdentifier safely quotes a configured schema name. Schema
+// names cannot be passed as query parameters, so quote the identifier here.
+func quotePostgresIdentifier(identifier string) (string, error) {
+	if identifier == "" || strings.IndexByte(identifier, 0) >= 0 {
+		return "", errors.New("must be a non-empty identifier without NUL bytes")
+	}
+	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`, nil
 }
 
 // Enqueue persists a new message with status 'pending'.

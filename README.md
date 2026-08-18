@@ -7,6 +7,17 @@
 process and supports in-memory, SQLite, and PostgreSQL storage. There is no
 separate broker to deploy.
 
+## Install shoeboxd
+
+Install the standalone server command with:
+
+```sh
+go install github.com/adexaja/shoebox/cmd/shoeboxd@latest
+```
+
+Then run `shoeboxd --config=config.yaml`. With modern Go versions, use
+`go install` for executables; `go get` adds library dependencies to a module.
+
 Use it when a Go channel is too limited but operating RabbitMQ or Kafka is not
 justified for the workload.
 
@@ -52,6 +63,7 @@ PostgreSQL example:
 q, _ := shoebox.New(shoebox.Options{
     Storage: shoebox.Postgres,
     DSN:     "host=localhost port=5432 dbname=shoebox user=postgres sslmode=disable",
+    Schema:  "worker", // optional; defaults to "public"
 })
 ```
 

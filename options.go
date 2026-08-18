@@ -31,6 +31,10 @@ type Options struct {
 	// DSN is used by Postgres and ignored by other backends.
 	DSN string
 
+	// Schema is the PostgreSQL schema used by the queue tables. It defaults to
+	// "public" and is ignored by other backends.
+	Schema string
+
 	// Concurrency is the per-queue worker pool size. Defaults to 4.
 	Concurrency int
 

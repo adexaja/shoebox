@@ -18,8 +18,27 @@ func TestLoad_EmptyPath(t *testing.T) {
 	if c.Storage.Kind != "memory" {
 		t.Fatalf("default kind = %q, want memory", c.Storage.Kind)
 	}
+	if c.Storage.Schema != "public" {
+		t.Fatalf("default schema = %q, want public", c.Storage.Schema)
+	}
 	if len(c.Webhooks) != 0 {
 		t.Fatalf("webhooks = %d, want 0", len(c.Webhooks))
+	}
+}
+
+func TestLoad_PostgresSchema(t *testing.T) {
+	yaml := `
+storage:
+  kind: postgres
+  dsn: "host=localhost"
+  schema: worker
+`
+	c, err := Load(writeTemp(t, yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Storage.Schema != "worker" {
+		t.Fatalf("schema = %q, want worker", c.Storage.Schema)
 	}
 }
 

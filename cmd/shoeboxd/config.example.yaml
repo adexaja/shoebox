@@ -15,6 +15,7 @@ storage:
   kind: memory             # memory | sqlite | postgres
   path: "shoebox.db"       # sqlite only
   dsn: ""                  # postgres only, e.g. "host=localhost port=5432 dbname=shoebox user=postgres password=secret sslmode=disable"
+  schema: "public"         # postgres only; created automatically if absent
 
 # Per-queue webhook targets. A queue listed here is push-delivered by the
 # broker: each message is POSTed to the URL, and non-2xx triggers normal

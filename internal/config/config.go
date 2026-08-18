@@ -48,9 +48,10 @@ type ServerConfig struct {
 
 // StorageConfig selects and configures the storage backend.
 type StorageConfig struct {
-	Kind string `yaml:"kind"` // memory | sqlite | postgres
-	Path string `yaml:"path"` // SQLite database path
-	DSN  string `yaml:"dsn"`  // Postgres DSN
+	Kind   string `yaml:"kind"`   // memory | sqlite | postgres
+	Path   string `yaml:"path"`   // SQLite database path
+	DSN    string `yaml:"dsn"`    // Postgres DSN
+	Schema string `yaml:"schema"` // PostgreSQL schema
 }
 
 // WebhookConfig declares push delivery for a single queue.
@@ -71,6 +72,9 @@ func (c *Config) defaults() {
 	}
 	if c.Storage.Path == "" {
 		c.Storage.Path = "shoebox.db"
+	}
+	if c.Storage.Schema == "" {
+		c.Storage.Schema = "public"
 	}
 	for name, wh := range c.Webhooks {
 		if wh.Timeout == 0 {

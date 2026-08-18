@@ -40,6 +40,7 @@ func main() {
 		storage    = flag.String("storage", "", "memory | sqlite | postgres (overrides config)")
 		dbPath     = flag.String("path", "", "SQLite database path (overrides config)")
 		dsn        = flag.String("dsn", "", "Postgres DSN (overrides config)")
+		dbSchema   = flag.String("schema", "", "Postgres schema (overrides config)")
 		authToken  = flag.String("auth-token", "", "bearer token / X-API-Key (overrides config)")
 	)
 	flag.Parse()
@@ -68,6 +69,9 @@ func main() {
 	if *dsn != "" {
 		cfg.Storage.DSN = *dsn
 	}
+	if *dbSchema != "" {
+		cfg.Storage.Schema = *dbSchema
+	}
 	if *authToken != "" {
 		cfg.Server.AuthToken = *authToken
 	}
@@ -83,6 +87,7 @@ func main() {
 	case "postgres":
 		opts.Storage = shoebox.Postgres
 		opts.DSN = cfg.Storage.DSN
+		opts.Schema = cfg.Storage.Schema
 	default:
 		fmt.Fprintf(os.Stderr, "shoeboxd: unknown storage %q\n", cfg.Storage.Kind)
 		os.Exit(2)
@@ -158,8 +163,8 @@ func main() {
 
 	// --- start server ---
 	srv := &http.Server{
-		Addr:    cfg.Server.Addr,
-		Handler: mux,
+		Addr:              cfg.Server.Addr,
+		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      30 * time.Second,

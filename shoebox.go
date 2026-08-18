@@ -68,7 +68,7 @@ func buildStorage(ctx context.Context, opts Options) (storage.Storage, error) {
 		if opts.DSN == "" {
 			return nil, fmt.Errorf("shoebox: Postgres storage requires Options.DSN")
 		}
-		return storage.NewPostgres(ctx, opts.DSN)
+		return storage.NewPostgres(ctx, opts.DSN, opts.Schema)
 	default:
 		return nil, fmt.Errorf("shoebox: unknown storage kind %d", opts.Storage)
 	}

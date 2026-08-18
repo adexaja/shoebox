@@ -14,6 +14,22 @@ import (
 // require a running Postgres; skip if unreachable.
 const testDSN = "host=localhost port=5432 dbname=shoebox user=postgres password=123 sslmode=disable"
 
+func TestQuotePostgresIdentifier(t *testing.T) {
+	got, err := quotePostgresIdentifier(`worker"queue`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != `"worker""queue"` {
+		t.Fatalf("quoted identifier = %q, want %q", got, `"worker""queue"`)
+	}
+	if _, err := quotePostgresIdentifier(""); err == nil {
+		t.Fatal("expected empty identifier to fail")
+	}
+	if _, err := quotePostgresIdentifier("bad\x00schema"); err == nil {
+		t.Fatal("expected NUL-containing identifier to fail")
+	}
+}
+
 // skipIfNoPostgres skips the test if the local Postgres is not reachable.
 func skipIfNoPostgres(t *testing.T) {
 	t.Helper()
