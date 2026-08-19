@@ -21,22 +21,47 @@ Then run `shoeboxd --config=config.yaml`. With modern Go versions, use
 Use it when a Go channel is too limited but operating RabbitMQ or Kafka is not
 justified for the workload.
 
+## Why Shoebox?
+
+Shoebox is for applications that need durable background work without
+deploying a separate broker. It can run in-process with Memory or SQLite, or
+use PostgreSQL when multiple application processes need to consume the same
+queues.
+
+| Project | Best fit | Main difference from Shoebox |
+|---------|----------|------------------------------|
+| Shoebox | Embedded queues and workers | Memory, SQLite, and PostgreSQL, plus retry, DLQ, HTTP API, dashboard, and webhooks |
+| [backlite](https://github.com/mikestefanello/backlite) | Type-safe embedded SQLite tasks | SQLite-focused and generic task-oriented |
+| [Asynq](https://github.com/hibiken/asynq) | Distributed task processing | Requires Redis |
+| [Machinery](https://github.com/RichardKnop/machinery) | Distributed job queues | Uses external message brokers |
+
 ## Quick start
 
 ```go
-import "github.com/adexaja/shoebox"
+package main
+
+import (
+	"context"
+	"log"
+
+	"github.com/adexaja/shoebox"
+)
 
 func main() {
-    q, _ := shoebox.New(shoebox.Options{
-        Storage: shoebox.Memory, // or shoebox.SQLite, shoebox.Postgres
-    })
+	q, err := shoebox.New(shoebox.Options{Storage: shoebox.Memory})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer q.Shutdown(context.Background())
 
-    q.Handle("orders", func(ctx context.Context, msg shoebox.Message) error {
-        // process the order
-        return nil
-    })
+	q.Handle("orders", func(ctx context.Context, msg shoebox.Message) error {
+		// process the order
+		return nil
+	})
 
-    _ = q.Enqueue("orders", []byte(`{"order_id": 123}`))
+	if err := q.Enqueue("orders", []byte(`{"order_id": 123}`)); err != nil {
+		log.Fatal(err)
+	}
 }
 ```
 
@@ -68,6 +93,12 @@ q, _ := shoebox.New(shoebox.Options{
 ```
 
 ## Delivery behavior
+
+Shoebox provides at-least-once processing. A message is acknowledged only
+after its handler returns successfully. If a process crashes while a message
+is being handled, persistent backends can make the message available again on
+startup. Handlers should therefore be safe to retry. Deduplication is
+best-effort and in-memory, not exactly-once delivery.
 
 ### Retries and dead letters
 
@@ -185,9 +216,15 @@ layer.
 
 ```go
 q.Use(shoebox.RecoveryMiddleware())
-q.Use(shoebox.MetricsMiddleware(q.metrics))
 q.Use(shoebox.LoggingMiddleware())
 q.Use(shoebox.TimeoutMiddleware(30 * time.Second))
+```
+
+To add handler-level metrics explicitly, create a metrics set:
+
+```go
+metrics := shoebox.NewMetrics("", nil)
+q.Use(shoebox.MetricsMiddleware(metrics))
 ```
 
 `RecoveryMiddleware` turns handler panics into errors, logs the stack trace,
@@ -234,7 +271,7 @@ webhooks:
     timeout: 10s
 ```
 
-CLI flags (`--addr`, `--storage`, `--path`, `--dsn`, and `--auth-token`)
+CLI flags (`--addr`, `--storage`, `--path`, `--dsn`, `--schema`, and `--auth-token`)
 override values from the config file. See
 [`cmd/shoeboxd/config.example.yaml`](cmd/shoeboxd/config.example.yaml).
 
@@ -249,6 +286,22 @@ The HTTP API is under `/api/`:
 | `POST` | `/queues/{name}/dlq/{id}/replay` | Replay a dead-letter message |
 | `DELETE` | `/queues/{name}/messages/{id}` | Acknowledge/delete a message |
 
+Example enqueue and pull flow:
+
+```sh
+curl -X POST http://localhost:8080/api/queues/orders/messages \
+  -H 'Authorization: Bearer secret' \
+  -H 'Content-Type: application/json' \
+  -d '{"payload":"{\"order_id\":123}"}'
+
+curl http://localhost:8080/api/queues/orders/messages/next \
+  -H 'Authorization: Bearer secret'
+```
+
+The dashboard is available at `/`, and Prometheus metrics at `/metrics`.
+Configure `dashboard_user` and `dashboard_password` for dashboard Basic Auth;
+`auth_token` protects API requests.
+
 Webhook delivery can be configured per queue. A non-2xx response follows the
 same retry, backoff, and DLQ path as any other handler. It is also available in
 library mode:
@@ -260,3 +313,9 @@ q.Handle("orders", shoebox.WebhookHandler("https://hooks.example.com/orders"))
 ## License
 
 MIT.
+
+## Status
+
+Shoebox is actively developed. The public API is intended for embedded queues,
+workers, and standalone-server use cases. Contributions and bug reports are
+welcome.
