@@ -212,6 +212,11 @@ Prometheus metrics, and webhook delivery.
 shoeboxd --config=config.yaml
 ```
 
+Install
+```sh
+go install github.com/adexaja/shoebox/cmd/shoeboxd@latest
+```
+
 Example configuration:
 
 ```yaml
