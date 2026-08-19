@@ -1,0 +1,13 @@
+coverage:
+  status:
+    project:
+      default:
+        target: 80%
+        threshold: 1%
+    patch: off
+
+ignore:
+  - "examples/**"
+  # shoeboxd is an executable wiring layer; library coverage is measured
+  # through the public package and internal components instead.
+  - "cmd/shoeboxd/**"
