@@ -24,10 +24,10 @@ jobs:
           cache: true
 
       - name: Test
-        run: go list ./... | rg -v '/examples/' | xargs go test
+        run: go list ./... | grep -v '/examples/' | xargs go test
 
       - name: Test with coverage
-        run: go list ./... | rg -v '/examples/' | xargs go test -covermode=atomic -coverprofile=coverage.out
+        run: go list ./... | grep -v '/examples/' | xargs go test -covermode=atomic -coverprofile=coverage.out
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
@@ -38,7 +38,7 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Test with race detector
-        run: go list ./... | rg -v '/examples/' | xargs go test -race
+        run: go list ./... | grep -v '/examples/' | xargs go test -race
 
       - name: Vet
-        run: go list ./... | rg -v '/examples/' | xargs go vet
+        run: go list ./... | grep -v '/examples/' | xargs go vet
