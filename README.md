@@ -2,10 +2,13 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/adexaja/shoebox.svg)](https://pkg.go.dev/github.com/adexaja/shoebox)
 [![Build Status](https://github.com/adexaja/shoebox/actions/workflows/ci.yml/badge.svg)](https://github.com/adexaja/shoebox/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/adexaja/shoebox/graph/badge.svg)](https://codecov.io/gh/adexaja/shoebox)
 
 `shoebox` is an embedded message queue for Go. It runs in the application
 process and supports in-memory, SQLite, and PostgreSQL storage. There is no
 separate broker to deploy.
+
+Coverage is generated in CI and uploaded to [Codecov](https://codecov.io/gh/adexaja/shoebox).
 
 ## Install shoeboxd
 
