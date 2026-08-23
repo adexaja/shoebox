@@ -1,0 +1,80 @@
+name: Benchmarks
+
+on:
+  schedule:
+    - cron: '30 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      refresh_baseline:
+        description: "Replace the checked-in baseline with this runner's output"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: shoebox
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d shoebox"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      SHOEBOX_TEST_POSTGRES_DSN: host=localhost port=5432 dbname=shoebox user=postgres password=postgres sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # Refresh on the same ubuntu-24.04 runner class used by this job:
+      # gh workflow run bench.yml -f refresh_baseline=true
+      - name: Install pinned benchstat
+        run: go install golang.org/x/perf/cmd/benchstat@v0.0.0-20260819171926-ebcb4798430d
+      - name: Run headline benchmarks
+        run: |
+          go test ./... -run '^$' -bench . -benchmem -count=5 | tee current.txt
+      - name: Refresh baseline
+        if: ${{ inputs.refresh_baseline == true }}
+        run: |
+          cp current.txt benchmarks/baseline.txt
+          {
+            echo "### Baseline refresh"
+            echo 'Commit `benchmarks/baseline.txt` from this run after reviewing the artifact.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Compare against baseline
+        if: ${{ inputs.refresh_baseline != true }}
+        run: |
+          baseline_cpu="$(sed -n 's/^cpu: //p' benchmarks/baseline.txt)"
+          current_cpu="$(sed -n 's/^cpu: //p' current.txt | head -1)"
+          if [ -n "$baseline_cpu" ] && [ "$baseline_cpu" != "$current_cpu" ]; then
+            echo "::error::baseline CPU '$baseline_cpu' differs from runner CPU '$current_cpu'; dispatch with refresh_baseline=true and commit the artifact"
+            exit 1
+          fi
+          benchstat -format csv benchmarks/baseline.txt current.txt | tee comparison.csv
+          benchstat benchmarks/baseline.txt current.txt | tee comparison.txt
+          cat comparison.txt >> "$GITHUB_STEP_SUMMARY"
+          awk -F, 'NR > 2 { gsub("%", "", $6); if (($6 + 0) > 10) bad = 1 } END { exit bad }' comparison.csv
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            current.txt
+            comparison.txt
+            comparison.csv
