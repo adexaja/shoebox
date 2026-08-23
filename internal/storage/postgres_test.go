@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/adexaja/shoebox/migrations"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -58,18 +59,17 @@ func newTestPostgres(t *testing.T) *Postgres {
 	if err != nil {
 		t.Fatalf("NewPostgres: %v", err)
 	}
-	// Clean tables between tests. DROP + re-open so schema changes (e.g.
-	// adding the priority column) are picked up — NewPostgres uses
-	// CREATE TABLE IF NOT EXISTS, which won't add columns to an existing
-	// table.
+	// Reset to a fresh database so each test starts from a known-empty
+	// state. The migration table must go too, otherwise the re-open below
+	// would trust its recorded version and skip rebuilding the schema.
 	ctx := context.Background()
-	if _, err := s.pool.Exec(ctx, `DROP TABLE IF EXISTS shoebox_messages`); err != nil {
-		s.Close()
-		t.Fatalf("drop messages: %v", err)
-	}
-	if _, err := s.pool.Exec(ctx, `DROP TABLE IF EXISTS shoebox_stats`); err != nil {
-		s.Close()
-		t.Fatalf("drop stats: %v", err)
+	for _, table := range []string{
+		"shoebox_messages", "shoebox_stats", "shoebox_schema_migrations",
+	} {
+		if _, err := s.pool.Exec(ctx, "DROP TABLE IF EXISTS "+table); err != nil {
+			s.Close()
+			t.Fatalf("drop %s: %v", table, err)
+		}
 	}
 	s.Close()
 
@@ -449,5 +449,146 @@ func TestPostgres_ConcurrentDequeueNoDoubleDelivery(t *testing.T) {
 
 	if delivered := got.Load(); delivered != total {
 		t.Errorf("total delivered = %d, want %d (double-delivery detected)", delivered, total)
+	}
+}
+
+// upMigration returns the dialect's up migration with the given version.
+func upMigration(t *testing.T, dialect string, version int) migrations.Migration {
+	t.Helper()
+	ups, err := migrations.Up(dialect)
+	if err != nil {
+		t.Fatalf("migrations.Up(%s): %v", dialect, err)
+	}
+	for _, m := range ups {
+		if m.Version == version {
+			return m
+		}
+	}
+	t.Fatalf("no %s up migration with version %d", dialect, version)
+	return migrations.Migration{}
+}
+
+// dropPostgresTables removes every shoebox table, leaving an empty database.
+func dropPostgresTables(t *testing.T, s *Postgres) {
+	t.Helper()
+	for _, table := range []string{
+		"shoebox_messages", "shoebox_stats", "shoebox_schema_migrations",
+	} {
+		if _, err := s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS "+table); err != nil {
+			t.Fatalf("drop %s: %v", table, err)
+		}
+	}
+}
+
+// TestPostgres_MigrationUpgradeFromV1 simulates a database created before
+// the migration runner existed, carrying only the 0001 schema (no priority
+// column, no version rows). Opening it with the current library must detect
+// the legacy baseline, apply 0002, and end up fully functional.
+func TestPostgres_MigrationUpgradeFromV1(t *testing.T) {
+	skipIfNoPostgres(t)
+	ctx := context.Background()
+
+	// Empty the database, then apply only migration 0001 by hand.
+	s0 := newTestPostgres(t)
+	dropPostgresTables(t, s0)
+	if _, err := s0.pool.Exec(ctx, upMigration(t, "postgres", 1).SQL); err != nil {
+		t.Fatalf("apply 0001: %v", err)
+	}
+	s0.Close()
+
+	// Open with the current library: baseline detection must record 1 and
+	// migration 0002 must be applied on open.
+	s, err := NewPostgres(ctx, testDSN)
+	if err != nil {
+		t.Fatalf("NewPostgres on v1 database: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	// Priority ordering (0002's column) must work end to end.
+	mustPgEnqueue(t, s, "q", Message{ID: "low", Payload: []byte("low")})
+	mustPgEnqueue(t, s, "q", Message{ID: "high", Payload: []byte("high"), Priority: 2})
+	got, err := s.Dequeue(ctx, "q", 10)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if len(got) != 2 || got[0].ID != "high" || got[1].ID != "low" {
+		t.Fatalf("dequeue after upgrade = [%s %s], want [high low]",
+			got[0].ID, got[1].ID)
+	}
+
+	var version int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT MAX(version) FROM shoebox_schema_migrations`).Scan(&version); err != nil {
+		t.Fatalf("read version: %v", err)
+	}
+	if version != 2 {
+		t.Fatalf("schema version after upgrade = %d, want 2", version)
+	}
+}
+
+// TestPostgres_ConcurrentOpenMigratesOnce verifies the advisory lock
+// serialises concurrent opens: several processes opening the same fresh
+// database all succeed, and each migration is recorded exactly once.
+func TestPostgres_ConcurrentOpenMigratesOnce(t *testing.T) {
+	skipIfNoPostgres(t)
+	ctx := context.Background()
+
+	// Empty database.
+	s0 := newTestPostgres(t)
+	dropPostgresTables(t, s0)
+	s0.Close()
+
+	const openers = 4
+	var wg sync.WaitGroup
+	errCh := make(chan error, openers)
+	for range openers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s, err := NewPostgres(ctx, testDSN)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			defer s.Close()
+			if err := s.Enqueue(ctx, "q", Message{
+				ID: NewMessageID(), Payload: []byte("m"),
+			}); err != nil {
+				errCh <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatalf("concurrent open: %v", err)
+	}
+
+	s, err := NewPostgres(ctx, testDSN)
+	if err != nil {
+		t.Fatalf("verify open: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	// One row per applied migration (0001, 0002): the version primary key
+	// plus the advisory lock make duplicates impossible.
+	var rows int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM shoebox_schema_migrations`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 2 {
+		t.Fatalf("migration rows after %d concurrent opens = %d, want 2", openers, rows)
+	}
+
+	// Every opener's enqueue survived: migration and message traffic did
+	// not interfere.
+	var depth int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM shoebox_messages`).Scan(&depth); err != nil {
+		t.Fatal(err)
+	}
+	if depth != openers {
+		t.Fatalf("messages enqueued during concurrent open = %d, want %d", depth, openers)
 	}
 }
