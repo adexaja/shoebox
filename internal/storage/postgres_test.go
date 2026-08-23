@@ -4,15 +4,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// testDSN is the local development Postgres connection string. These tests
-// require a running Postgres; skip if unreachable.
-const testDSN = "host=localhost port=5432 dbname=shoebox user=postgres password=123 sslmode=disable"
+// testDSN is the Postgres connection string used by storage tests and
+// benchmarks. It is taken from SHOEBOX_TEST_POSTGRES_DSN when set — CI
+// injects the service-container credentials this way. Without it, tests
+// fall back to a local development server using trust/peer auth. Tests
+// skip when the server is unreachable.
+var testDSN = func() string {
+	if dsn := os.Getenv("SHOEBOX_TEST_POSTGRES_DSN"); dsn != "" {
+		return dsn
+	}
+	return "host=localhost port=5432 dbname=shoebox user=postgres sslmode=disable"
+}()
 
 func TestQuotePostgresIdentifier(t *testing.T) {
 	got, err := quotePostgresIdentifier(`worker"queue`)
