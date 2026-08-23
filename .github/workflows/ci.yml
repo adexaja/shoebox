@@ -13,6 +13,26 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: shoebox
+        ports:
+          - 5432:5432
+        # Health check doubles as the readiness gate: steps do not start
+        # until the server accepts connections.
+        options: >-
+          --health-cmd "pg_isready -U postgres -d shoebox"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      SHOEBOX_TEST_POSTGRES_DSN: host=localhost port=5432 dbname=shoebox user=postgres password=postgres sslmode=disable
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
