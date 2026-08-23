@@ -15,13 +15,13 @@ import (
 	"github.com/adexaja/shoebox/internal/storage"
 )
 
-// Options configures a Broker.
 type Options struct {
 	Storage       storage.Storage
 	Concurrency   int
 	Logger        *slog.Logger
 	Dedupe        DedupeOptions
 	DedupeMetrics DedupeMetrics
+	DurableDedupe bool
 }
 
 // DedupeMetrics receives optional deduplication instrumentation from the
@@ -72,10 +72,10 @@ type Broker struct {
 	shuttingDown atomic.Bool
 
 	// dedupe suppresses duplicate enqueues within a per-key TTL window
-	// (ADR 0006 §Deduplication).
 	dedupe        dedupeStore
 	dedupeMetrics DedupeMetrics
 	dedupeTTL     time.Duration
+	durableDedupe bool
 
 	// paused holds per-queue atomic flags. When set, the dispatcher skips
 	// dequeuing that queue so messages accumulate until Resume.
@@ -123,6 +123,7 @@ func New(opts Options) *Broker {
 		dedupe:        dedupe,
 		dedupeMetrics: opts.DedupeMetrics,
 		dedupeTTL:     DefaultDedupeTTL,
+		durableDedupe: opts.DurableDedupe,
 		paused:        make(map[string]*atomic.Bool),
 		qDraining:     make(map[string]*atomic.Bool),
 		drainDone:     make(map[string]chan struct{}),
@@ -196,20 +197,20 @@ func (b *Broker) storeCtx() context.Context {
 // including during Shutdown — the broker is designed to drain in-flight
 // work before stopping.
 func (b *Broker) Enqueue(ctx context.Context, queue string, payload []byte, opts EnqueueOpts) error {
-	// Deduplication: if a DedupeKey is set and a matching key is still live
-	// for this queue, silently suppress this enqueue (no error, no store
-	// write). The caller's contract is fire-and-forget, so returning nil is
-	// the right signal — the message was "accepted" even if deduplicated.
-	if opts.DedupeKey != "" && b.dedupe.SeenOrAdd(queue+":"+opts.DedupeKey, b.dedupeTTL) {
+	// Durable Postgres dedupe is enforced by the storage unique index.
+	if !b.durableDedupe && opts.DedupeKey != "" && b.dedupe.SeenOrAdd(queue+":"+opts.DedupeKey, b.dedupeTTL) {
 		if b.dedupeMetrics != nil {
 			b.dedupeMetrics.DedupeHit(queue)
 			b.dedupeMetrics.DedupeEntries(b.dedupe.Len())
 		}
 		return nil
 	}
-	if opts.DedupeKey != "" && b.dedupeMetrics != nil {
+	if !b.durableDedupe && opts.DedupeKey != "" && b.dedupeMetrics != nil {
 		b.dedupeMetrics.DedupeMiss(queue)
 		b.dedupeMetrics.DedupeEntries(b.dedupe.Len())
+	}
+	if b.durableDedupe && opts.DedupeKey != "" && b.dedupeMetrics != nil {
+		b.dedupeMetrics.DedupeMiss(queue)
 	}
 
 	now := time.Now()
@@ -230,6 +231,7 @@ func (b *Broker) Enqueue(ctx context.Context, queue string, payload []byte, opts
 		CreatedAt:   now,
 		ScheduledAt: scheduled,
 		Priority:    opts.Priority,
+		DedupeKey:   opts.DedupeKey,
 		Metadata:    opts.Metadata,
 	}
 	if err := b.store.Enqueue(ctx, queue, msg); err != nil {

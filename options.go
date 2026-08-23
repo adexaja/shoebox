@@ -58,6 +58,7 @@ type DedupePolicy string
 const (
 	DedupePolicyUnboundedTTL DedupePolicy = "unbounded_ttl"
 	DedupePolicyBoundedLRU   DedupePolicy = "bounded_lru"
+	DedupePolicyDurable      DedupePolicy = "durable"
 )
 
 // DedupeOptions configures in-memory message deduplication.

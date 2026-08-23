@@ -22,6 +22,7 @@ type Message struct {
 	MaxRetries  int
 	CreatedAt   time.Time
 	ScheduledAt time.Time
+	DedupeKey   string
 	Metadata    map[string]string
 
 	// Priority is the delivery hint. Higher values are dequeued first
