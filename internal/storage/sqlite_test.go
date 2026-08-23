@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -342,5 +343,49 @@ func TestSQLite_Reclaim(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].ID != "x" {
 		t.Fatalf("got %v, want [x]", ids(got))
+	}
+}
+
+// TestSQLite_MigrationUpgradeFromV1 mirrors the Postgres upgrade test: a
+// database carrying only the 0001 schema (no priority column, user_version
+// 0) must be detected as a legacy database, upgraded to the latest
+// migration, and remain fully functional.
+func TestSQLite_MigrationUpgradeFromV1(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "upgrade.db")
+	ctx := context.Background()
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, upMigration(t, "sqlite", 1).SQL); err != nil {
+		db.Close()
+		t.Fatalf("apply 0001: %v", err)
+	}
+	db.Close()
+
+	s, err := NewSQLite(ctx, path)
+	if err != nil {
+		t.Fatalf("NewSQLite on v1 database: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	// Priority ordering (0002's column) must work end to end.
+	mustEnqueueStore(t, s, "q", Message{ID: "low", Payload: []byte("low")})
+	mustEnqueueStore(t, s, "q", Message{ID: "high", Payload: []byte("high"), Priority: 2})
+	got, err := s.Dequeue(ctx, "q", 10)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if len(got) != 2 || got[0].ID != "high" || got[1].ID != "low" {
+		t.Fatalf("dequeue after upgrade = %v, want [high low]", ids(got))
+	}
+
+	version, err := sqliteUserVersion(ctx, s.db)
+	if err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	if version != 2 {
+		t.Fatalf("user_version after upgrade = %d, want 2", version)
 	}
 }

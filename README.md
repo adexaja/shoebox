@@ -95,6 +95,19 @@ q, _ := shoebox.New(shoebox.Options{
 })
 ```
 
+### Upgrades
+
+Both persistent backends migrate their schema automatically on open: fresh
+databases are created at the latest version, and databases from older
+shoebox releases are upgraded in place (forward-only, each migration in a
+transaction). Concurrent processes opening the same Postgres database
+serialise on an advisory lock, so upgrades under load are safe.
+
+The canonical DDL lives in [`migrations/`](migrations/) using the
+`NNNN_name.<dialect>.<up|down>.sql` convention, so external migration tools
+can consume the same files. Down migrations exist for manual rollback but
+are never applied automatically.
+
 ## Delivery behavior
 
 Shoebox provides at-least-once processing. A message is acknowledged only

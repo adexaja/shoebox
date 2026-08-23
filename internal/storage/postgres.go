@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/adexaja/shoebox/migrations"
 )
 
 // Postgres is a persistent storage backend using an external PostgreSQL
@@ -26,9 +27,6 @@ type Postgres struct {
 	pool   *pgxpool.Pool
 	schema string
 }
-
-//go:embed schema_postgres.sql
-var postgresSchema string
 
 // NewPostgres opens a connection pool to the Postgres database at dsn,
 // initialises the schema, and reclaims stale 'processing' rows from any
@@ -100,14 +98,27 @@ func quotePostgresIdentifier(identifier string) (string, error) {
 	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`, nil
 }
 
-// initPostgresSchema serialises schema creation across all shoebox instances
-// that share a database. CREATE TABLE IF NOT EXISTS is not sufficient here:
-// concurrent CREATE TABLE statements can race while PostgreSQL creates the
-// table's implicit composite type, resulting in a duplicate pg_type entry.
+// initPostgresSchema applies pending schema migrations from the embedded
+// migrations/ directory (the canonical DDL source), creating the schema on
+// fresh databases and upgrading older ones in place.
 //
-// The advisory lock is transaction-scoped and the schema is executed on the
-// same acquired connection, so the lock remains held for the whole DDL batch.
+// The whole run executes inside one transaction guarded by the advisory
+// lock: concurrent shoebox processes sharing the database serialise instead
+// of racing (the lock also prevents the duplicate pg_type entry PostgreSQL
+// can produce when concurrent CREATE TABLEs race), and PostgreSQL's
+// transactional DDL means a failed migration leaves the previous version
+// fully intact.
+//
+// Databases created before the migration runner existed have no version
+// table; their baseline is detected once from the live schema and recorded
+// (see appliedPostgresVersion).
 func initPostgresSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	ups, err := migrations.Up("postgres")
+	if err != nil {
+		return err
+	}
+	latest := ups[len(ups)-1].Version
+
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return err
@@ -124,10 +135,81 @@ func initPostgresSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		`SELECT pg_advisory_xact_lock(hashtextextended('shoebox:schema:init', 0))`); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, postgresSchema); err != nil {
+	if _, err := tx.Exec(ctx, `CREATE TABLE IF NOT EXISTS shoebox_schema_migrations (
+		version    INTEGER PRIMARY KEY,
+		applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`); err != nil {
 		return err
 	}
+
+	applied, err := appliedPostgresVersion(ctx, tx, latest)
+	if err != nil {
+		return err
+	}
+
+	for _, m := range ups {
+		if m.Version <= applied {
+			continue
+		}
+		if _, err := tx.Exec(ctx, m.SQL); err != nil {
+			return fmt.Errorf("migration %s: %w", m.Name, err)
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO shoebox_schema_migrations (version) VALUES ($1)`, m.Version); err != nil {
+			return fmt.Errorf("record migration %d: %w", m.Version, err)
+		}
+	}
 	return tx.Commit(ctx)
+}
+
+// appliedPostgresVersion returns the schema version the database is at.
+// When the version table has no rows the database predates the migration
+// runner: a shoebox_messages table without a priority column matches
+// migration 0001 only (baseline 1), one with it matches the last
+// hand-embedded schema (baseline = latest), and no shoebox tables at all
+// means a fresh database (baseline 0). Detected baselines are recorded so
+// later opens read a single row instead of re-detecting.
+func appliedPostgresVersion(ctx context.Context, tx pgx.Tx, latest int) (int, error) {
+	var rows int
+	if err := tx.QueryRow(ctx,
+		`SELECT COUNT(*) FROM shoebox_schema_migrations`).Scan(&rows); err != nil {
+		return 0, err
+	}
+	if rows > 0 {
+		var v int
+		if err := tx.QueryRow(ctx,
+			`SELECT COALESCE(MAX(version), 0) FROM shoebox_schema_migrations`).Scan(&v); err != nil {
+			return 0, err
+		}
+		return v, nil
+	}
+
+	var tables int
+	if err := tx.QueryRow(ctx,
+		`SELECT COUNT(*) FROM information_schema.tables
+		 WHERE table_schema = current_schema() AND table_name = 'shoebox_messages'`).Scan(&tables); err != nil {
+		return 0, err
+	}
+	if tables == 0 {
+		return 0, nil
+	}
+
+	baseline := 1
+	var cols int
+	if err := tx.QueryRow(ctx,
+		`SELECT COUNT(*) FROM information_schema.columns
+		 WHERE table_schema = current_schema() AND table_name = 'shoebox_messages'
+		   AND column_name = 'priority'`).Scan(&cols); err != nil {
+		return 0, err
+	}
+	if cols > 0 {
+		baseline = latest
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO shoebox_schema_migrations (version) VALUES ($1)`, baseline); err != nil {
+		return 0, err
+	}
+	return baseline, nil
 }
 
 // Enqueue persists a new message with status 'pending'.

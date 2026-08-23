@@ -3,14 +3,16 @@ package storage
 import (
 	"context"
 	"database/sql"
-	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver; registers as "sqlite"
+
+	"github.com/adexaja/shoebox/migrations"
 )
 
 // SQLite is a persistent storage backend using an embedded SQLite database.
@@ -25,12 +27,124 @@ type SQLite struct {
 	db *sql.DB
 }
 
-//go:embed schema_sqlite.sql
-var schemaSQL string
+// initSQLiteSchema applies pending schema migrations from the embedded
+// migrations/ directory (the canonical DDL source), creating the schema on
+// fresh databases and upgrading older ones in place. PRAGMA user_version
+// tracks the applied version; it is transactional in SQLite, so each
+// migration commits atomically with its version bump.
+//
+// The pool holds a single connection, so a process cannot race itself, and
+// SQLite's file locking serialises concurrent openers; a concurrent opener
+// sees the recorded version and applies nothing.
+//
+// Databases created before the migration runner existed carry user_version 0
+// with existing tables; their baseline is detected once from the live schema
+// and recorded (see detectSQLiteBaseline).
+func initSQLiteSchema(ctx context.Context, db *sql.DB) error {
+	ups, err := migrations.Up("sqlite")
+	if err != nil {
+		return err
+	}
+	latest := ups[len(ups)-1].Version
 
-// NewSQLite opens (or creates) a SQLite database at path and initialises the
-// schema. It also reclaims any "processing" rows left by a previous crash
-// (transitioning them back to "pending") so that unacked messages are
+	version, err := sqliteUserVersion(ctx, db)
+	if err != nil {
+		return err
+	}
+	if version == 0 {
+		baseline, err := detectSQLiteBaseline(ctx, db, latest)
+		if err != nil {
+			return err
+		}
+		if baseline > 0 {
+			if err := setSQLiteUserVersion(ctx, db, baseline); err != nil {
+				return err
+			}
+			version = baseline
+		}
+	}
+
+	for _, m := range ups {
+		if m.Version <= version {
+			continue
+		}
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, m.SQL); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("migration %s: %w", m.Name, err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			"PRAGMA user_version = "+strconv.Itoa(m.Version)); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("set user_version %d: %w", m.Version, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// sqliteUserVersion reads PRAGMA user_version, the applied-migration marker.
+func sqliteUserVersion(ctx context.Context, db *sql.DB) (int, error) {
+	var v int
+	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&v); err != nil {
+		return 0, fmt.Errorf("read user_version: %w", err)
+	}
+	return v, nil
+}
+
+// setSQLiteUserVersion records the applied-migration marker.
+func setSQLiteUserVersion(ctx context.Context, db *sql.DB, version int) error {
+	if _, err := db.ExecContext(ctx,
+		"PRAGMA user_version = "+strconv.Itoa(version)); err != nil {
+		return fmt.Errorf("set user_version %d: %w", version, err)
+	}
+	return nil
+}
+
+// detectSQLiteBaseline determines the version of a pre-runner database from
+// its live schema: no shoebox tables → 0 (fresh), a shoebox_messages table
+// without a priority column → 1, with one → latest. Mirrors
+// appliedPostgresVersion for the Postgres backend.
+func detectSQLiteBaseline(ctx context.Context, db *sql.DB, latest int) (int, error) {
+	var tables int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'shoebox_messages'`).Scan(&tables); err != nil {
+		return 0, err
+	}
+	if tables == 0 {
+		return 0, nil
+	}
+
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(shoebox_messages)`)
+	if err != nil {
+		return 0, err
+	}
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notNull, pk int
+		var dfltValue any // column default; NULL when absent
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &pk); err != nil {
+			return 0, err
+		}
+		if name == "priority" {
+			return latest, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	return 1, nil
+}
+
+// NewSQLite opens (or creates) a SQLite database at path, applies pending
+// schema migrations, and reclaims any "processing" rows left by a previous
+// crash (transitioning them back to "pending") so that unacked messages are
 // redelivered on restart (E2-S1).
 func NewSQLite(ctx context.Context, path string) (*SQLite, error) {
 	db, err := sql.Open("sqlite", path)
@@ -44,7 +158,7 @@ func NewSQLite(ctx context.Context, path string) (*SQLite, error) {
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0) // persistent file; no recycling needed
 
-	if _, err := db.ExecContext(ctx, schemaSQL); err != nil {
+	if err := initSQLiteSchema(ctx, db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("shoebox/sqlite: init schema: %w", err)
 	}
