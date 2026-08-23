@@ -36,10 +36,13 @@ func TestDurableDedupePostgres(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		stats, _ = q.Stats(context.Background(), queue)
-		if stats.Depth == 0 {
+		if stats.Processed >= 1 {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+	if stats.Processed < 1 {
+		t.Fatalf("message was not acknowledged before key reuse: %#v", stats)
 	}
 	if err := q.Enqueue(queue, []byte("three"), DedupeKey("K")); err != nil {
 		t.Fatal(err)
