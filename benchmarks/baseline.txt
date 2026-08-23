@@ -1,0 +1,14 @@
+goos: linux
+goarch: amd64
+pkg: github.com/adexaja/shoebox
+cpu: AMD Ryzen 5 7430U with Radeon Graphics
+BenchmarkBrokerThroughput_Memory-12       53250  101790 ns/op  1603 B/op  7 allocs/op
+BenchmarkBrokerThroughput_SQLite-12       3778   286227 ns/op  5820 B/op  137 allocs/op
+BenchmarkBrokerThroughput_Postgres-12     196    6060363 ns/op 3774 B/op  64 allocs/op
+
+pkg: github.com/adexaja/shoebox/internal/storage
+BenchmarkMemoryEnqueue-12                 3031380 445.8 ns/op 1183 B/op 1 allocs/op
+BenchmarkMemoryDequeue_SteadyState-12     85177   13902 ns/op 504 B/op 6 allocs/op
+BenchmarkMemoryDequeue_Batch-12           6710    184340 ns/op 26241 B/op 304 allocs/op
+BenchmarkSQLiteEnqueue-12                 23726   54304 ns/op 1185 B/op 24 allocs/op
+BenchmarkSQLiteDequeue-12                 2157    545119 ns/op 5107 B/op 130 allocs/op
