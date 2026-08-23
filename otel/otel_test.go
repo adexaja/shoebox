@@ -6,9 +6,9 @@ import (
 	"testing"
 
 	"github.com/adexaja/shoebox"
-	"go.opentelemetry.io/otel/trace"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestTraceMiddlewareAttributesAndError(t *testing.T) {
