@@ -24,13 +24,13 @@ func TestExponential_Growth(t *testing.T) {
 		attempt int
 		want    time.Duration
 	}{
-		{1, 100 * time.Millisecond},   // base * 2^0
-		{2, 200 * time.Millisecond},   // base * 2^1
-		{3, 400 * time.Millisecond},   // base * 2^2
-		{4, 800 * time.Millisecond},   // base * 2^3
-		{5, 1600 * time.Millisecond},  // base * 2^4
-		{6, 3200 * time.Millisecond},  // base * 2^5
-		{7, 6400 * time.Millisecond},  // base * 2^6
+		{1, 100 * time.Millisecond},  // base * 2^0
+		{2, 200 * time.Millisecond},  // base * 2^1
+		{3, 400 * time.Millisecond},  // base * 2^2
+		{4, 800 * time.Millisecond},  // base * 2^3
+		{5, 1600 * time.Millisecond}, // base * 2^4
+		{6, 3200 * time.Millisecond}, // base * 2^5
+		{7, 6400 * time.Millisecond}, // base * 2^6
 	}
 	for _, tc := range cases {
 		if got := b.Next(tc.attempt); got != tc.want {

@@ -20,20 +20,20 @@ func newBenchPostgres(b *testing.B) *Postgres {
 	}
 	ctx := context.Background()
 	if _, err := s.pool.Exec(ctx, `DROP TABLE IF EXISTS shoebox_messages`); err != nil {
-		s.Close()
+		_ = s.Close()
 		b.Fatalf("drop messages: %v", err)
 	}
 	if _, err := s.pool.Exec(ctx, `DROP TABLE IF EXISTS shoebox_stats`); err != nil {
-		s.Close()
+		_ = s.Close()
 		b.Fatalf("drop stats: %v", err)
 	}
-	s.Close()
+	_ = s.Close()
 
 	s, err = NewPostgres(ctx, testDSN)
 	if err != nil {
 		b.Fatalf("NewPostgres (re-open): %v", err)
 	}
-	b.Cleanup(func() { s.Close() })
+	b.Cleanup(func() { _ = s.Close() })
 	return s
 }
 

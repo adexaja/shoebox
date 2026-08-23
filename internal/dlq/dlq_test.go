@@ -59,8 +59,8 @@ func TestDLQ_Inspect(t *testing.T) {
 	mgr, store := newTestManager(t)
 	ctx := context.Background()
 
-	store.Enqueue(ctx, "orders.dlq", storage.Message{ID: "a", Payload: []byte("x"), Error: "boom"})
-	store.Enqueue(ctx, "orders.dlq", storage.Message{ID: "b", Payload: []byte("y"), Error: "kaboom"})
+	_ = store.Enqueue(ctx, "orders.dlq", storage.Message{ID: "a", Payload: []byte("x"), Error: "boom"})
+	_ = store.Enqueue(ctx, "orders.dlq", storage.Message{ID: "b", Payload: []byte("y"), Error: "kaboom"})
 
 	r, err := mgr.Inspect(ctx, "orders", "b")
 	if err != nil {
@@ -78,7 +78,7 @@ func TestDLQ_Inspect(t *testing.T) {
 func TestDLQ_InspectNotFound(t *testing.T) {
 	mgr, store := newTestManager(t)
 	ctx := context.Background()
-	store.Enqueue(ctx, "orders.dlq", storage.Message{ID: "a"})
+	_ = store.Enqueue(ctx, "orders.dlq", storage.Message{ID: "a"})
 
 	_, err := mgr.Inspect(ctx, "orders", "nonexistent")
 	if !errors.Is(err, storage.ErrEmpty) {
@@ -99,7 +99,7 @@ func TestDLQ_Replay(t *testing.T) {
 		Attempts: 3,
 		Error:    "transient failure",
 	}
-	store.Enqueue(ctx, "orders.dlq", msg)
+	_ = store.Enqueue(ctx, "orders.dlq", msg)
 
 	// Replay it back to "orders".
 	if err := mgr.Replay(ctx, "orders", "recoverable"); err != nil {

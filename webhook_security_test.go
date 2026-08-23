@@ -30,7 +30,7 @@ func TestWebhookHandler_HMACSignature(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	secret := "whsec-test-key"
+	secret := "whsec-test-key" //nolint:gosec // dummy value for signature tests, not a real credential
 	payload := `{"event":"created"}`
 
 	h := WebhookHandler(srv.URL, nil, WithWebhookSecret(secret))
@@ -133,7 +133,7 @@ func TestWebhookHandler_SignatureVariesByPayload(t *testing.T) {
 	var mu sync.Mutex
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.ReadAll(r.Body) // drain
+		_, _ = io.ReadAll(r.Body) // drain
 		mu.Lock()
 		sigs = append(sigs, r.Header.Get("X-Shoebox-Signature"))
 		mu.Unlock()
@@ -174,7 +174,7 @@ func TestNewWebhookClient_NoRedirects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Should get the 302, NOT follow to /target.
 	if resp.StatusCode != http.StatusFound {

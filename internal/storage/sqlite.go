@@ -73,12 +73,12 @@ func initSQLiteSchema(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, m.SQL); err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return fmt.Errorf("migration %s: %w", m.Name, err)
 		}
 		if _, err := tx.ExecContext(ctx,
 			"PRAGMA user_version = "+strconv.Itoa(m.Version)); err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return fmt.Errorf("set user_version %d: %w", m.Version, err)
 		}
 		if err := tx.Commit(); err != nil {
@@ -159,7 +159,7 @@ func NewSQLite(ctx context.Context, path string) (*SQLite, error) {
 	db.SetConnMaxLifetime(0) // persistent file; no recycling needed
 
 	if err := initSQLiteSchema(ctx, db); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("shoebox/sqlite: init schema: %w", err)
 	}
 
@@ -170,7 +170,7 @@ func NewSQLite(ctx context.Context, path string) (*SQLite, error) {
 	// dispatcher picks it up again.
 	if _, err := db.ExecContext(ctx,
 		`UPDATE shoebox_messages SET status = 'pending' WHERE status = 'processing'`); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("shoebox/sqlite: reclaim: %w", err)
 	}
 
@@ -222,7 +222,7 @@ func (s *SQLite) Dequeue(ctx context.Context, queue string, limit int) ([]Messag
 	if err != nil {
 		return nil, fmt.Errorf("shoebox/sqlite: dequeue begin: %w", err)
 	}
-	defer tx.Rollback() // safe to call after Commit
+	defer func() { _ = tx.Rollback() }() // safe to call after Commit
 
 	now := time.Now().Format(time.RFC3339Nano)
 
@@ -241,13 +241,13 @@ func (s *SQLite) Dequeue(ctx context.Context, queue string, limit int) ([]Messag
 	for rows.Next() {
 		m, err := scanMessage(rows)
 		if err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, fmt.Errorf("shoebox/sqlite: dequeue scan: %w", err)
 		}
 		m.Queue = queue
 		msgs = append(msgs, m)
 	}
-	rows.Close()
+	_ = rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("shoebox/sqlite: dequeue rows: %w", err)
 	}
@@ -277,7 +277,7 @@ func (s *SQLite) Ack(ctx context.Context, queue, msgID string) error {
 	if err != nil {
 		return fmt.Errorf("shoebox/sqlite: ack begin: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM shoebox_messages WHERE id = ? AND queue = ?`, msgID, queue); err != nil {
@@ -303,7 +303,7 @@ func (s *SQLite) Nack(ctx context.Context, queue, msgID string, nakErr error) er
 	if err != nil {
 		return fmt.Errorf("shoebox/sqlite: nack begin: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM shoebox_messages WHERE id = ? AND queue = ?`, msgID, queue); err != nil {
@@ -328,7 +328,7 @@ func (s *SQLite) Dead(ctx context.Context, queue, msgID string, deadErr error) e
 	if err != nil {
 		return fmt.Errorf("shoebox/sqlite: dead begin: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	errStr := ""
 	if deadErr != nil {
@@ -364,7 +364,7 @@ func (s *SQLite) List(ctx context.Context, queue string, limit int) ([]Message, 
 	if err != nil {
 		return nil, fmt.Errorf("shoebox/sqlite: list query: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var msgs []Message
 	for rows.Next() {

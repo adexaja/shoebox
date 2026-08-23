@@ -18,11 +18,11 @@ import (
 // delivered (handler returns nil → message acked).
 func TestWebhookHandler_Success(t *testing.T) {
 	var got struct {
-		body     string
-		msgID    string
-		queue    string
-		attempt  string
-		ctype    string
+		body    string
+		msgID   string
+		queue   string
+		attempt string
+		ctype   string
 	}
 	var mu sync.Mutex
 
@@ -74,7 +74,7 @@ func TestWebhookHandler_Success(t *testing.T) {
 func TestWebhookHandler_Non2xx(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("internal error"))
+		_, _ = w.Write([]byte("internal error"))
 	}))
 	defer srv.Close()
 

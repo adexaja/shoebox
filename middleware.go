@@ -136,10 +136,3 @@ func MetricsMiddleware(metrics *Metrics) Middleware {
 type errPanic struct{ value any }
 
 func (e errPanic) Error() string { return "shoebox: handler panicked" }
-
-func errOrNil(err error) any {
-	if err == nil {
-		return nil
-	}
-	return err
-}

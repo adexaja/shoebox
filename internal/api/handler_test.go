@@ -238,13 +238,13 @@ func TestStats_Success(t *testing.T) {
 
 func TestAck_Success(t *testing.T) {
 	h, store := newTestHandler(t)
-	id := enqueueMessage(t, store, "orders", "to-ack")
+	_ = enqueueMessage(t, store, "orders", "to-ack")
 
 	// Dequeue first so the message is in-flight.
 	_, _ = store.Dequeue(context.Background(), "orders", 1)
 
 	// Actually, memory storage removes on Dequeue. Re-enqueue for ack test.
-	id = enqueueMessage(t, store, "orders", "to-ack-2")
+	id := enqueueMessage(t, store, "orders", "to-ack-2")
 
 	req := httptest.NewRequest(http.MethodDelete, "/queues/orders/messages/{id}", nil)
 	req.SetPathValue("name", "orders")
@@ -354,7 +354,7 @@ func TestRecoveryMiddleware_CatchesPanic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusInternalServerError)
@@ -488,7 +488,7 @@ func TestLoggingMiddleware_LogsRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	logOutput := buf.String()
 	if !strings.Contains(logOutput, "http") {

@@ -18,7 +18,7 @@ func newTestSQLite(t *testing.T) *SQLite {
 	if err != nil {
 		t.Fatalf("NewSQLite: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -233,14 +233,14 @@ func TestSQLite_CrashRecovery(t *testing.T) {
 	}
 
 	// "Crash": close without acking.
-	s1.Close()
+	_ = s1.Close()
 
 	// Reopen — Reclaim should transition 'processing' → 'pending'.
 	s2, err := NewSQLite(ctx, path)
 	if err != nil {
 		t.Fatalf("NewSQLite s2: %v", err)
 	}
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 
 	// The message must be redelivered.
 	msgs2, err := s2.Dequeue(ctx, "q", 1)
@@ -359,16 +359,16 @@ func TestSQLite_MigrationUpgradeFromV1(t *testing.T) {
 		t.Fatalf("open raw: %v", err)
 	}
 	if _, err := db.ExecContext(ctx, upMigration(t, "sqlite", 1).SQL); err != nil {
-		db.Close()
+		_ = db.Close()
 		t.Fatalf("apply 0001: %v", err)
 	}
-	db.Close()
+	_ = db.Close()
 
 	s, err := NewSQLite(ctx, path)
 	if err != nil {
 		t.Fatalf("NewSQLite on v1 database: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 
 	// Priority ordering (0002's column) must work end to end.
 	mustEnqueueStore(t, s, "q", Message{ID: "low", Payload: []byte("low")})

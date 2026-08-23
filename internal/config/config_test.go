@@ -202,7 +202,7 @@ func TestParse_NoWebhooks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Webhooks != nil && len(c.Webhooks) > 0 {
+	if len(c.Webhooks) > 0 {
 		t.Fatalf("webhooks should be empty, got %d", len(c.Webhooks))
 	}
 }

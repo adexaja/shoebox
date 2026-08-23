@@ -70,7 +70,7 @@ func TestQueueAccessorsAndDepthGauge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer q.Shutdown(context.Background())
+	defer func() { _ = q.Shutdown(context.Background()) }()
 
 	q.Handle("orders", func(context.Context, Message) error { return nil })
 	if err := q.Enqueue("orders", []byte("payload")); err != nil {

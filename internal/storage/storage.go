@@ -40,12 +40,12 @@ type Message struct {
 
 // QueueStats is the storage-layer view of queue statistics.
 type QueueStats struct {
-	Queue   string
-	Depth   int
+	Queue     string
+	Depth     int
 	Processed uint64
-	Errors  uint64
-	Retries uint64
-	Dead    uint64
+	Errors    uint64
+	Retries   uint64
+	Dead      uint64
 }
 
 // ErrEmpty is returned by Dequeue when no messages are available.

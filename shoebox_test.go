@@ -35,7 +35,7 @@ func newTestQueue(t *testing.T) *Queue {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		q.Shutdown(ctx)
+		_ = q.Shutdown(ctx)
 	})
 	return q
 }
@@ -66,9 +66,9 @@ func TestMetrics_ProcessedAndErrors(t *testing.T) {
 		return nil
 	})
 
-	q.Enqueue("jobs", []byte("ok"))
-	q.Enqueue("jobs", []byte("fail"))
-	q.Enqueue("jobs", []byte("ok"))
+	_ = q.Enqueue("jobs", []byte("ok"))
+	_ = q.Enqueue("jobs", []byte("fail"))
+	_ = q.Enqueue("jobs", []byte("ok"))
 
 	// Wait for all three to be processed.
 	waitFor(t, func() bool {
@@ -90,7 +90,7 @@ func TestPanicRecovery(t *testing.T) {
 		panic("boom")
 	}, HandlerOptions{MaxRetries: 0})
 
-	q.Enqueue("dangerous", []byte("explode"))
+	_ = q.Enqueue("dangerous", []byte("explode"))
 
 	// Wait for the panic to be recovered and processed.
 	waitFor(t, func() bool {
@@ -187,7 +187,7 @@ func TestMiddleware_Ordering(t *testing.T) {
 		return nil
 	})
 
-	q.Enqueue("q", []byte("x"))
+	_ = q.Enqueue("q", []byte("x"))
 
 	waitFor(t, func() bool {
 		orderMu.Lock()
@@ -240,7 +240,7 @@ func TestMetricsHandler_ExposesMetrics(t *testing.T) {
 
 	q.Use(MetricsMiddleware(q.metrics))
 	q.Handle("webhooks", func(ctx context.Context, m Message) error { return nil })
-	q.Enqueue("webhooks", []byte("x"))
+	_ = q.Enqueue("webhooks", []byte("x"))
 
 	waitFor(t, func() bool {
 		return collectCounter(t, q.metrics.Processed, "webhooks") == 1
@@ -282,8 +282,8 @@ func TestLoggingMiddleware_LogLevels(t *testing.T) {
 		return nil
 	})
 
-	q.Enqueue("q", []byte("ok"))
-	q.Enqueue("q", []byte("fail"))
+	_ = q.Enqueue("q", []byte("ok"))
+	_ = q.Enqueue("q", []byte("fail"))
 
 	// Drain: wait for both log messages to appear (thread-safe via the
 	// mutex-protected writer).
@@ -297,7 +297,7 @@ func TestLoggingMiddleware_LogLevels(t *testing.T) {
 	// Shutdown before reading the buffer to ensure no more writes happen.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	q.Shutdown(ctx)
+	_ = q.Shutdown(ctx)
 
 	mu.Lock()
 	output := buf.String()
