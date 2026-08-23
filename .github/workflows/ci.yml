@@ -70,3 +70,9 @@ jobs:
 
       - name: Vet
         run: go list ./... | grep -v '/examples/' | xargs go vet
+
+      - name: Test OpenTelemetry module
+        run: cd otel && go test ./...
+
+      - name: Vet OpenTelemetry module
+        run: cd otel && go vet ./...
