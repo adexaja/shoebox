@@ -26,7 +26,7 @@ func newPriorityQueue(t *testing.T) *Queue {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		q.Shutdown(ctx)
+		_ = q.Shutdown(ctx)
 	})
 	return q
 }

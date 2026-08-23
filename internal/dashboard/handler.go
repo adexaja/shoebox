@@ -182,4 +182,3 @@ func truncatePayload(payload []byte, maxLen int) string {
 	}
 	return s[:maxLen] + "…"
 }
-

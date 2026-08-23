@@ -47,7 +47,7 @@ func skipIfNoPostgres(t *testing.T) {
 	if err != nil {
 		t.Skipf("Postgres not available: %v", err)
 	}
-	s.Close()
+	_ = s.Close()
 }
 
 // newTestPostgres opens a fresh Postgres backend and cleans the tables so
@@ -67,17 +67,17 @@ func newTestPostgres(t *testing.T) *Postgres {
 		"shoebox_messages", "shoebox_stats", "shoebox_schema_migrations",
 	} {
 		if _, err := s.pool.Exec(ctx, "DROP TABLE IF EXISTS "+table); err != nil {
-			s.Close()
+			_ = s.Close()
 			t.Fatalf("drop %s: %v", table, err)
 		}
 	}
-	s.Close()
+	_ = s.Close()
 
 	s, err = NewPostgres(ctx, testDSN)
 	if err != nil {
 		t.Fatalf("NewPostgres (re-open): %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -259,8 +259,8 @@ func TestPostgres_CrashRecovery(t *testing.T) {
 		t.Fatalf("NewPostgres s1: %v", err)
 	}
 	// Clean slate for this test.
-	s1.pool.Exec(ctx, `DELETE FROM shoebox_messages`)
-	s1.pool.Exec(ctx, `DELETE FROM shoebox_stats`)
+	_, _ = s1.pool.Exec(ctx, `DELETE FROM shoebox_messages`)
+	_, _ = s1.pool.Exec(ctx, `DELETE FROM shoebox_stats`)
 
 	mustPgEnqueue(t, s1, "q", Message{ID: "survivor", Payload: []byte("data")})
 
@@ -271,7 +271,7 @@ func TestPostgres_CrashRecovery(t *testing.T) {
 	if len(msgs) != 1 || msgs[0].ID != "survivor" {
 		t.Fatalf("got %v, want [survivor]", ids(msgs))
 	}
-	s1.Close()
+	_ = s1.Close()
 
 	// Reopen — Reclaim should transition 'processing' → 'pending'.
 	s2, err := NewPostgres(ctx, testDSN)
@@ -279,9 +279,9 @@ func TestPostgres_CrashRecovery(t *testing.T) {
 		t.Fatalf("NewPostgres s2: %v", err)
 	}
 	defer func() {
-		s2.pool.Exec(ctx, `DELETE FROM shoebox_messages`)
-		s2.pool.Exec(ctx, `DELETE FROM shoebox_stats`)
-		s2.Close()
+		_, _ = s2.pool.Exec(ctx, `DELETE FROM shoebox_messages`)
+		_, _ = s2.pool.Exec(ctx, `DELETE FROM shoebox_stats`)
+		_ = s2.Close()
 	}()
 
 	msgs2, err := s2.Dequeue(ctx, "q", 1)
@@ -385,19 +385,19 @@ func TestPostgres_ConcurrentDequeueNoDoubleDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPostgres s1: %v", err)
 	}
-	defer s1.Close()
+	defer func() { _ = s1.Close() }()
 	ctx := context.Background()
-	s1.pool.Exec(ctx, `DELETE FROM shoebox_messages`)
-	s1.pool.Exec(ctx, `DELETE FROM shoebox_stats`)
+	_, _ = s1.pool.Exec(ctx, `DELETE FROM shoebox_messages`)
+	_, _ = s1.pool.Exec(ctx, `DELETE FROM shoebox_stats`)
 
 	s2, err := NewPostgres(context.Background(), testDSN)
 	if err != nil {
 		t.Fatalf("NewPostgres s2: %v", err)
 	}
 	defer func() {
-		s2.pool.Exec(ctx, `DELETE FROM shoebox_messages`)
-		s2.pool.Exec(ctx, `DELETE FROM shoebox_stats`)
-		s2.Close()
+		_, _ = s2.pool.Exec(ctx, `DELETE FROM shoebox_messages`)
+		_, _ = s2.pool.Exec(ctx, `DELETE FROM shoebox_stats`)
+		_ = s2.Close()
 	}()
 
 	// Enqueue 50 messages.
@@ -494,7 +494,7 @@ func TestPostgres_MigrationUpgradeFromV1(t *testing.T) {
 	if _, err := s0.pool.Exec(ctx, upMigration(t, "postgres", 1).SQL); err != nil {
 		t.Fatalf("apply 0001: %v", err)
 	}
-	s0.Close()
+	_ = s0.Close()
 
 	// Open with the current library: baseline detection must record 1 and
 	// migration 0002 must be applied on open.
@@ -502,7 +502,7 @@ func TestPostgres_MigrationUpgradeFromV1(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPostgres on v1 database: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 
 	// Priority ordering (0002's column) must work end to end.
 	mustPgEnqueue(t, s, "q", Message{ID: "low", Payload: []byte("low")})
@@ -536,7 +536,7 @@ func TestPostgres_ConcurrentOpenMigratesOnce(t *testing.T) {
 	// Empty database.
 	s0 := newTestPostgres(t)
 	dropPostgresTables(t, s0)
-	s0.Close()
+	_ = s0.Close()
 
 	const openers = 4
 	var wg sync.WaitGroup
@@ -550,7 +550,7 @@ func TestPostgres_ConcurrentOpenMigratesOnce(t *testing.T) {
 				errCh <- err
 				return
 			}
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 			if err := s.Enqueue(ctx, "q", Message{
 				ID: NewMessageID(), Payload: []byte("m"),
 			}); err != nil {
@@ -568,7 +568,7 @@ func TestPostgres_ConcurrentOpenMigratesOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify open: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 
 	// One row per applied migration (0001, 0002): the version primary key
 	// plus the advisory lock make duplicates impossible.

@@ -43,7 +43,7 @@ func main() {
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode >= 500 {
 			return fmt.Errorf("webhook %s -> %d", url, resp.StatusCode)
 		}

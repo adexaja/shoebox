@@ -1,0 +1,28 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - staticcheck
+    - govet
+    - gosec
+    - ineffassign
+    - unused
+
+  exclusions:
+    rules:
+      # gosec is scoped to the HTTP/auth/webhook surface only: the public
+      # HTTP API, the dashboard, webhook delivery, and the shoeboxd server
+      # command (issue #10). Findings there are fixed or carry a line-local
+      # //nolint with a justification; everything else is out of scope.
+      - path: ^(internal/(storage|retry|naming|dlq|config|broker)/|migrations/|examples/|(metrics|middleware|message|options|shoebox)\.go)
+        linters:
+          - gosec
+
+formatters:
+  enable:
+    - gofmt

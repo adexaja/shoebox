@@ -59,7 +59,7 @@ func TestPause_Idempotent(t *testing.T) {
 
 	q.Pause("jobs")
 	q.Pause("jobs") // idempotent
-	q.Enqueue("jobs", []byte("x"))
+	_ = q.Enqueue("jobs", []byte("x"))
 	time.Sleep(200 * time.Millisecond)
 
 	if got := atomic.LoadInt64(&count); got != 0 {
@@ -137,15 +137,15 @@ func TestPause_DuringActiveDispatch(t *testing.T) {
 	})
 
 	// Enqueue one message — it will block in the handler.
-	q.Enqueue("jobs", []byte("first"))
+	_ = q.Enqueue("jobs", []byte("first"))
 	waitFor(t, func() bool { return atomic.LoadInt64(&inflight) >= 1 }, 2*time.Second)
 
 	// Pause while the handler is running.
 	q.Pause("jobs")
 
 	// Enqueue more messages while paused — they should NOT be picked up.
-	q.Enqueue("jobs", []byte("second"))
-	q.Enqueue("jobs", []byte("third"))
+	_ = q.Enqueue("jobs", []byte("second"))
+	_ = q.Enqueue("jobs", []byte("third"))
 
 	time.Sleep(200 * time.Millisecond)
 

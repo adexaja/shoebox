@@ -129,7 +129,7 @@ func initPostgresSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	if _, err := tx.Exec(ctx,
 		`SELECT pg_advisory_xact_lock(hashtextextended('shoebox:schema:init', 0))`); err != nil {
@@ -260,7 +260,7 @@ func (p *Postgres) Dequeue(ctx context.Context, queue string, limit int) ([]Mess
 	if err != nil {
 		return nil, fmt.Errorf("shoebox/postgres: dequeue begin: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	rows, err := tx.Query(ctx,
 		`SELECT id, payload, attempts, max_retries, created_at, scheduled_at, metadata, error, dead_at, priority
@@ -313,7 +313,7 @@ func (p *Postgres) Ack(ctx context.Context, queue, msgID string) error {
 	if err != nil {
 		return fmt.Errorf("shoebox/postgres: ack begin: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	if _, err := tx.Exec(ctx,
 		`DELETE FROM shoebox_messages WHERE id = $1 AND queue = $2`, msgID, queue); err != nil {
@@ -337,7 +337,7 @@ func (p *Postgres) Nack(ctx context.Context, queue, msgID string, nakErr error) 
 	if err != nil {
 		return fmt.Errorf("shoebox/postgres: nack begin: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	if _, err := tx.Exec(ctx,
 		`DELETE FROM shoebox_messages WHERE id = $1 AND queue = $2`, msgID, queue); err != nil {
@@ -360,7 +360,7 @@ func (p *Postgres) Dead(ctx context.Context, queue, msgID string, deadErr error)
 	if err != nil {
 		return fmt.Errorf("shoebox/postgres: dead begin: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	errStr := ""
 	if deadErr != nil {

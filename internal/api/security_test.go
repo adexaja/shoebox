@@ -48,7 +48,7 @@ func TestAuthMiddleware_ConstantTime(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			resp.Body.Close()
+			_ = resp.Body.Close()
 
 			if tt.wantAuth {
 				if resp.StatusCode != http.StatusOK {
@@ -110,7 +110,7 @@ func TestBasicAuthMiddleware(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			resp.Body.Close()
+			_ = resp.Body.Close()
 
 			if tt.wantAuth {
 				if resp.StatusCode != http.StatusOK {
@@ -152,7 +152,7 @@ func TestBasicAuthMiddleware_EmptyUserPassthrough(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (passthrough)", resp.StatusCode)
@@ -161,7 +161,6 @@ func TestBasicAuthMiddleware_EmptyUserPassthrough(t *testing.T) {
 		t.Fatal("handler should be called when auth is disabled")
 	}
 }
-
 
 func TestEnqueue_BodySizeLimit(t *testing.T) {
 	h, _ := newTestHandler(t)

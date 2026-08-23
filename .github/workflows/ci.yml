@@ -42,6 +42,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.1
+          args: ./...
       - name: Build
         run: go build ./...
 

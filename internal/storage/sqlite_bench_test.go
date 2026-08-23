@@ -15,7 +15,7 @@ func newBenchSQLite(b *testing.B) *SQLite {
 	if err != nil {
 		b.Fatal(err)
 	}
-	b.Cleanup(func() { s.Close() })
+	b.Cleanup(func() { _ = s.Close() })
 	return s
 }
 

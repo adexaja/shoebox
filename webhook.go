@@ -126,7 +126,7 @@ func newWebhookClient(timeout time.Duration, maxIdle int) *http.Client {
 	if maxIdle <= 0 {
 		maxIdle = 16
 	}
-	var transport http.RoundTripper = http.DefaultTransport
+	var transport = http.DefaultTransport
 	if base, ok := http.DefaultTransport.(*http.Transport); ok && base != nil {
 		tr := base.Clone()
 		tr.MaxIdleConnsPerHost = maxIdle
@@ -166,7 +166,7 @@ func (h *webhookHandler) deliver(ctx context.Context, m Message) error {
 	if err != nil {
 		return fmt.Errorf("webhook: post %s: %w", h.target, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		// Read a bounded snippet of the response body so the DLQ page

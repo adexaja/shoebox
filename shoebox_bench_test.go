@@ -41,7 +41,7 @@ func benchQueue(tb testing.TB, kind StorageKind, b *testing.B) *Queue {
 	b.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		q.Shutdown(ctx)
+		_ = q.Shutdown(ctx)
 	})
 	return q
 }
