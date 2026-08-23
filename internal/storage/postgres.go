@@ -520,3 +520,86 @@ func (p *pgxType) Time() time.Time {
 	}
 	return p.time
 }
+
+func scanPostgresSchedule(row interface{ Scan(...any) error }) (Schedule, error) {
+	var s Schedule
+	var options []byte
+	var interval int64
+	if err := row.Scan(&s.ID, &s.Queue, &s.Payload, &options, &interval, &s.NextRunAt, &s.Enabled, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		return Schedule{}, err
+	}
+	s.Payload = append([]byte(nil), s.Payload...)
+	s.EnqueueOptions = append([]byte(nil), options...)
+	s.Interval = time.Duration(interval)
+	return s, nil
+}
+
+func (p *Postgres) CreateSchedule(ctx context.Context, v Schedule) error {
+	_, err := p.pool.Exec(ctx, `INSERT INTO shoebox_schedules
+		(id, queue, payload, enqueue_options, interval_ns, next_run_at, enabled, created_at, updated_at)
+		VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9)`,
+		v.ID, v.Queue, v.Payload, string(v.EnqueueOptions), int64(v.Interval), v.NextRunAt.UTC(),
+		v.Enabled, v.CreatedAt.UTC(), v.UpdatedAt.UTC())
+	return err
+}
+
+func (p *Postgres) UpdateSchedule(ctx context.Context, v Schedule) error {
+	_, err := p.pool.Exec(ctx, `UPDATE shoebox_schedules SET queue=$1,payload=$2,
+		enqueue_options=$3::jsonb,interval_ns=$4,next_run_at=$5,enabled=$6,updated_at=$7 WHERE id=$8`,
+		v.Queue, v.Payload, string(v.EnqueueOptions), int64(v.Interval), v.NextRunAt.UTC(),
+		v.Enabled, v.UpdatedAt.UTC(), v.ID)
+	return err
+}
+
+func (p *Postgres) DeleteSchedule(ctx context.Context, id string) error {
+	_, err := p.pool.Exec(ctx, `DELETE FROM shoebox_schedules WHERE id=$1`, id)
+	return err
+}
+
+func (p *Postgres) ListSchedules(ctx context.Context, queue string) ([]Schedule, error) {
+	query := `SELECT id,queue,payload,enqueue_options,interval_ns,next_run_at,enabled,created_at,updated_at FROM shoebox_schedules`
+	args := []any{}
+	if queue != "" {
+		query += ` WHERE queue=$1`
+		args = append(args, queue)
+	}
+	query += ` ORDER BY id`
+	rows, err := p.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Schedule
+	for rows.Next() {
+		v, err := scanPostgresSchedule(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+func (p *Postgres) DueSchedules(ctx context.Context, now time.Time, limit int) ([]Schedule, error) {
+	rows, err := p.pool.Query(ctx, `SELECT id,queue,payload,enqueue_options,interval_ns,next_run_at,enabled,created_at,updated_at
+		FROM shoebox_schedules WHERE enabled AND next_run_at <= $1 ORDER BY next_run_at LIMIT $2`, now.UTC(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Schedule
+	for rows.Next() {
+		v, err := scanPostgresSchedule(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+func (p *Postgres) ClaimSchedule(ctx context.Context, id string, now, next time.Time) (bool, error) {
+	tag, err := p.pool.Exec(ctx, `UPDATE shoebox_schedules SET next_run_at=$1,updated_at=now()
+		WHERE id=$2 AND enabled AND next_run_at <= $3`, next.UTC(), id, now.UTC())
+	return tag.RowsAffected() == 1, err
+}
