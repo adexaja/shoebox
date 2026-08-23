@@ -21,6 +21,18 @@ go install github.com/adexaja/shoebox/cmd/shoeboxd@latest
 Then run `shoeboxd --config=config.yaml`. With modern Go versions, use
 `go install` for executables; `go get` adds library dependencies to a module.
 
+Prebuilt `shoeboxd` archives for Linux and macOS (amd64 and arm64) are
+available on the [releases page](https://github.com/adexaja/shoebox/releases).
+Download the archive for your platform, extract `shoeboxd`, and place it on
+your `PATH`.
+
+The server is also published as a GHCR image:
+
+```sh
+docker pull ghcr.io/adexaja/shoebox:latest
+docker run --rm -p 8080:8080 ghcr.io/adexaja/shoebox:latest
+```
+
 Use it when a Go channel is too limited but operating RabbitMQ or Kafka is not
 justified for the workload.
 
