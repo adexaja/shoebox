@@ -293,6 +293,14 @@ q.Drain(ctx, "orders")
 processes the named queue until it has no dequeuable messages and no in-flight
 workers, then stops that queue's dispatcher. Other queues continue running.
 
+## OpenTelemetry
+
+Tracing support is an optional nested module, so the root library has no
+OpenTelemetry dependency. Import `github.com/adexaja/shoebox/otel` and add
+`otel.TraceMiddleware(tracer)` to a queue. The middleware creates one
+`shoebox.process` span per handler attempt and propagates W3C `traceparent`
+metadata.
+
 ## Middleware and metrics
 
 Middleware runs in registration order; the first `Use` call is the outermost
