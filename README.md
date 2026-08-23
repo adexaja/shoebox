@@ -36,6 +36,26 @@ docker run --rm -p 8080:8080 ghcr.io/adexaja/shoebox:latest
 Use it when a Go channel is too limited but operating RabbitMQ or Kafka is not
 justified for the workload.
 
+## Type-safe tasks
+
+The typed helpers use JSON by default while preserving the existing byte
+oriented API. Decode failures are ordinary handler errors, so retries and the
+dead-letter path apply normally.
+
+```go
+type Email struct {
+    To      string `json:"to"`
+    Subject string `json:"subject"`
+}
+
+shoebox.HandleTask(q, "emails", func(ctx context.Context, email Email) error {
+    return sendEmail(ctx, email)
+})
+shoebox.EnqueueTask(q, "emails", Email{To: "user@example.com", Subject: "Welcome"})
+```
+
+Use `EnqueueTaskWithCodec` and `HandleTaskWithCodec` for a custom codec.
+
 ## Why Shoebox?
 
 Shoebox is for applications that need durable background work without

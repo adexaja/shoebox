@@ -13,7 +13,8 @@ func TestDurableDedupePostgres(t *testing.T) {
 	if dsn == "" {
 		t.Skip("SHOEBOX_TEST_POSTGRES_DSN is not set")
 	}
-	q, err := New(Options{Storage: Postgres, DSN: dsn, Dedupe: DedupeOptions{Policy: DedupePolicyDurable}})
+	q, err := New(Options{Storage: Postgres, DSN: dsn, Schema: "durable_dedupe_test",
+		Dedupe: DedupeOptions{Policy: DedupePolicyDurable}})
 	if err != nil {
 		t.Skipf("Postgres unavailable: %v", err)
 	}
