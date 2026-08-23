@@ -315,7 +315,7 @@ q.Handle("orders", shoebox.WebhookHandler("https://hooks.example.com/orders"))
 
 ## License
 
-MIT.
+MIT — see [LICENSE](LICENSE).
 
 ## Status
 
