@@ -50,7 +50,7 @@ func main() {
 			return err
 		}
 		idx := nextSalesman.Add(1) - 1
-		l.AssignedTo = salesmen[int(idx)%len(salesmen)]
+		l.AssignedTo = salesmen[idx%uint64(len(salesmen))]
 		fmt.Printf("[leads] %s -> %s\n", l.Name, l.AssignedTo)
 
 		// Enqueue a notification. The idempotent part of the workflow

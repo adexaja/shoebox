@@ -424,10 +424,10 @@ func (s *SQLite) Stats(ctx context.Context, queue string) (QueueStats, error) {
 			return QueueStats{}, fmt.Errorf("shoebox/sqlite: stats query: %w", err)
 		}
 	}
-	s2.Processed = uint64(processed.Int64)
-	s2.Errors = uint64(errs.Int64)
-	s2.Retries = uint64(retries.Int64)
-	s2.Dead = uint64(dead.Int64)
+	s2.Processed = nonNegativeUint64(processed.Int64)
+	s2.Errors = nonNegativeUint64(errs.Int64)
+	s2.Retries = nonNegativeUint64(retries.Int64)
+	s2.Dead = nonNegativeUint64(dead.Int64)
 
 	// Depth: count of pending messages.
 	var depth int
