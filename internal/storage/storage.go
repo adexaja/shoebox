@@ -1,9 +1,6 @@
 // Package storage defines the Storage interface that abstracts over the
 // queue's persistence layer. The broker only ever talks to Storage; the
 // concrete backend (Memory, SQLite, Postgres) is selected at New() time.
-//
-// See docs/adr/0001-storage-interface-is-core-abstraction.md for the
-// rationale.
 package storage
 
 import (
