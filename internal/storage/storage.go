@@ -38,6 +38,31 @@ type Message struct {
 	DeadAt time.Time
 }
 
+// Schedule is a persistent periodic enqueue definition.
+type Schedule struct {
+	ID             string
+	Queue          string
+	Payload        []byte
+	EnqueueOptions []byte
+	Interval       time.Duration
+	NextRunAt      time.Time
+	Enabled        bool
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+// ScheduleStore persists periodic enqueue definitions.
+type ScheduleStore interface {
+	CreateSchedule(ctx context.Context, schedule Schedule) error
+	UpdateSchedule(ctx context.Context, schedule Schedule) error
+	DeleteSchedule(ctx context.Context, id string) error
+	ListSchedules(ctx context.Context, queue string) ([]Schedule, error)
+	ClaimSchedule(ctx context.Context, id string, now, next time.Time) (bool, error)
+	DueSchedules(ctx context.Context, now time.Time, limit int) ([]Schedule, error)
+}
+
+var ErrScheduleExists = errors.New("shoebox/storage: schedule already exists")
+
 // QueueStats is the storage-layer view of queue statistics.
 type QueueStats struct {
 	Queue     string

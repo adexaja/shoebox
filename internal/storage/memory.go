@@ -15,21 +15,20 @@ import (
 // minute. The linear-scan Ack and Nack are fine at that size; if Memory
 // ever needs to scale up, switch to an index by ID.
 type Memory struct {
-	mu       sync.Mutex
-	queues   map[string][]Message
-	counters map[string]*QueueStats
-	// dirty marks queues whose pending slice has been modified since the
-	// last sort. Dequeue only re-sorts dirty queues, avoiding an O(n log n)
-	// pass on every 250ms idle poll.
-	dirty map[string]bool
+	mu        sync.Mutex
+	queues    map[string][]Message
+	counters  map[string]*QueueStats
+	dirty     map[string]bool
+	schedules map[string]Schedule
 }
 
 // NewMemory returns an empty in-memory storage backend.
 func NewMemory() *Memory {
 	return &Memory{
-		queues:   make(map[string][]Message),
-		counters: make(map[string]*QueueStats),
-		dirty:    make(map[string]bool),
+		queues:    make(map[string][]Message),
+		counters:  make(map[string]*QueueStats),
+		dirty:     make(map[string]bool),
+		schedules: make(map[string]Schedule),
 	}
 }
 
@@ -188,6 +187,76 @@ func (m *Memory) List(_ context.Context, queue string, limit int) ([]Message, er
 // (not kept in a separate in-flight set), so if the process dies they are
 // simply gone. Persistent backends use Reclaim for crash recovery.
 func (m *Memory) Reclaim(_ context.Context, _ string) error { return nil }
+
+func (m *Memory) CreateSchedule(_ context.Context, s Schedule) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.schedules[s.ID]; exists {
+		return ErrScheduleExists
+	}
+	m.schedules[s.ID] = s
+	return nil
+}
+
+func (m *Memory) UpdateSchedule(_ context.Context, s Schedule) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.schedules[s.ID]; !exists {
+		return ErrEmpty
+	}
+	m.schedules[s.ID] = s
+	return nil
+}
+
+func (m *Memory) DeleteSchedule(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.schedules, id)
+	return nil
+}
+
+func (m *Memory) ListSchedules(_ context.Context, queue string) ([]Schedule, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]Schedule, 0, len(m.schedules))
+	for _, s := range m.schedules {
+		if queue == "" || s.Queue == queue {
+			s.Payload = append([]byte(nil), s.Payload...)
+			out = append(out, s)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+func (m *Memory) DueSchedules(_ context.Context, now time.Time, limit int) ([]Schedule, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]Schedule, 0, limit)
+	for _, s := range m.schedules {
+		if s.Enabled && !s.NextRunAt.After(now) {
+			s.Payload = append([]byte(nil), s.Payload...)
+			out = append(out, s)
+			if len(out) == limit {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+func (m *Memory) ClaimSchedule(_ context.Context, id string, now, next time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.schedules[id]
+	if !ok || !s.Enabled || s.NextRunAt.After(now) {
+		return false, nil
+	}
+	s.NextRunAt = next
+	s.UpdatedAt = time.Now().UTC()
+	m.schedules[id] = s
+	return true, nil
+}
 
 // Close is a no-op for Memory; included for interface compliance.
 func (m *Memory) Close() error { return nil }

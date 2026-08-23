@@ -118,6 +118,17 @@ const (
 	High
 )
 
+// PeriodicJob describes a persistent schedule that enqueues the payload at
+// every interval. StartAt defaults to the registration time.
+type PeriodicJob struct {
+	ID      string
+	Queue   string
+	Payload []byte
+	Every   time.Duration
+	StartAt time.Time
+	Enabled bool
+}
+
 // EnqueueOpt mutates an EnqueueOptions.
 type EnqueueOpt func(*EnqueueOptions)
 

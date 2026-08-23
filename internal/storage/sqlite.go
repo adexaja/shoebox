@@ -486,3 +486,103 @@ func tsOrEmpty(t time.Time) string {
 	}
 	return t.Format(time.RFC3339Nano)
 }
+
+func sqliteScheduleTime(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
+
+func scanSQLiteSchedule(row interface{ Scan(...any) error }) (Schedule, error) {
+	var s Schedule
+	var payload []byte
+	var options string
+	var interval int64
+	var next, created, updated string
+	var enabled int
+	if err := row.Scan(&s.ID, &s.Queue, &payload, &options, &interval, &next, &enabled, &created, &updated); err != nil {
+		return Schedule{}, err
+	}
+	s.Payload = append([]byte(nil), payload...)
+	s.EnqueueOptions = []byte(options)
+	s.Interval = time.Duration(interval)
+	s.NextRunAt, _ = time.Parse(time.RFC3339Nano, next)
+	s.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	s.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	s.Enabled = enabled != 0
+	return s, nil
+}
+
+func (s *SQLite) CreateSchedule(ctx context.Context, v Schedule) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO shoebox_schedules
+		(id, queue, payload, enqueue_options, interval_ns, next_run_at, enabled, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		v.ID, v.Queue, v.Payload, string(v.EnqueueOptions), int64(v.Interval),
+		sqliteScheduleTime(v.NextRunAt), v.Enabled, sqliteScheduleTime(v.CreatedAt), sqliteScheduleTime(v.UpdatedAt))
+	return err
+}
+
+func (s *SQLite) UpdateSchedule(ctx context.Context, v Schedule) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE shoebox_schedules SET queue=?, payload=?,
+		enqueue_options=?, interval_ns=?, next_run_at=?, enabled=?, updated_at=? WHERE id=?`,
+		v.Queue, v.Payload, string(v.EnqueueOptions), int64(v.Interval), sqliteScheduleTime(v.NextRunAt),
+		v.Enabled, sqliteScheduleTime(v.UpdatedAt), v.ID)
+	return err
+}
+
+func (s *SQLite) DeleteSchedule(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM shoebox_schedules WHERE id=?`, id)
+	return err
+}
+
+func (s *SQLite) ListSchedules(ctx context.Context, queue string) ([]Schedule, error) {
+	query := `SELECT id, queue, payload, enqueue_options, interval_ns, next_run_at, enabled, created_at, updated_at
+		FROM shoebox_schedules`
+	args := []any{}
+	if queue != "" {
+		query += ` WHERE queue=?`
+		args = append(args, queue)
+	}
+	query += ` ORDER BY id`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Schedule
+	for rows.Next() {
+		v, err := scanSQLiteSchedule(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLite) DueSchedules(ctx context.Context, now time.Time, limit int) ([]Schedule, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, queue, payload, enqueue_options, interval_ns,
+		next_run_at, enabled, created_at, updated_at FROM shoebox_schedules
+		WHERE enabled=1 AND next_run_at <= ? ORDER BY next_run_at LIMIT ?`,
+		sqliteScheduleTime(now), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Schedule
+	for rows.Next() {
+		v, err := scanSQLiteSchedule(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLite) ClaimSchedule(ctx context.Context, id string, now, next time.Time) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE shoebox_schedules SET next_run_at=?, updated_at=?
+		WHERE id=? AND enabled=1 AND next_run_at <= ?`,
+		sqliteScheduleTime(next), sqliteScheduleTime(time.Now()), id, sqliteScheduleTime(now))
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}

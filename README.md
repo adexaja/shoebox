@@ -151,6 +151,28 @@ record, _ := mgr.Inspect(ctx, "orders", id)
 mgr.Replay(ctx, "orders", id)
 ```
 
+### Periodic jobs
+
+Persistent backends store periodic schedules and recover them after restart.
+Each due cadence is enqueued through the normal `Enqueue` path. Missed
+occurrences advance to the first future cadence instead of replaying an
+unbounded backlog.
+
+```go
+q.RegisterPeriodic(shoebox.PeriodicJob{
+    ID: "hourly-report",
+    Queue: "reports",
+    Payload: []byte(`{"kind":"summary"}`),
+    Every: time.Hour,
+    Enabled: true,
+})
+defer q.RemovePeriodic("hourly-report")
+```
+
+Schedules are claimed atomically by SQLite and PostgreSQL, so multiple queue
+instances do not enqueue the same occurrence. `Pause` leaves a schedule
+persisted; its cadence continues and missed runs follow the same rule.
+
 ### Delayed and scheduled messages
 
 Messages can become visible after a delay or at a specific time. If both

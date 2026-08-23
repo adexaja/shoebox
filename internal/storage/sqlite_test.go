@@ -385,7 +385,7 @@ func TestSQLite_MigrationUpgradeFromV1(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read user_version: %v", err)
 	}
-	if version != 2 {
-		t.Fatalf("user_version after upgrade = %d, want 2", version)
+	if version != 3 {
+		t.Fatalf("user_version after upgrade = %d, want 3", version)
 	}
 }

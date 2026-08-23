@@ -218,6 +218,62 @@ func (q *Queue) UpdateDepthGauges(ctx context.Context) {
 	}
 }
 
+// RegisterPeriodic persists a periodic enqueue schedule.
+func (q *Queue) RegisterPeriodic(job PeriodicJob) error {
+	if job.ID == "" {
+		return fmt.Errorf("shoebox: periodic job ID is required")
+	}
+	if !naming.ValidQueueName(job.Queue) {
+		return fmt.Errorf("shoebox: invalid queue name %q", job.Queue)
+	}
+	if job.Every <= 0 {
+		return fmt.Errorf("shoebox: periodic interval must be positive")
+	}
+	now := time.Now().UTC()
+	start := job.StartAt
+	if start.IsZero() {
+		start = now
+	}
+	schedules, err := q.b.PeriodicJobs(context.Background(), "")
+	if err != nil {
+		return err
+	}
+	for _, existing := range schedules {
+		if existing.ID == job.ID {
+			return storage.ErrScheduleExists
+		}
+	}
+	return q.b.RegisterPeriodic(context.Background(), storage.Schedule{
+		ID: job.ID, Queue: job.Queue, Payload: append([]byte(nil), job.Payload...),
+		Interval: job.Every, NextRunAt: start.UTC(), Enabled: job.Enabled,
+		CreatedAt: now, UpdatedAt: now,
+	})
+}
+
+// RemovePeriodic deletes a periodic enqueue schedule.
+func (q *Queue) RemovePeriodic(id string) error {
+	if id == "" {
+		return fmt.Errorf("shoebox: periodic job ID is required")
+	}
+	return q.b.RemovePeriodic(context.Background(), id)
+}
+
+// PeriodicJobs returns all persisted periodic schedules.
+func (q *Queue) PeriodicJobs(ctx context.Context) ([]PeriodicJob, error) {
+	schedules, err := q.b.PeriodicJobs(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PeriodicJob, 0, len(schedules))
+	for _, s := range schedules {
+		out = append(out, PeriodicJob{
+			ID: s.ID, Queue: s.Queue, Payload: append([]byte(nil), s.Payload...),
+			Every: s.Interval, StartAt: s.NextRunAt, Enabled: s.Enabled,
+		})
+	}
+	return out, nil
+}
+
 // Pause stops the dispatcher from dequeuing messages on the named queue.
 // In-flight handlers continue to run; new messages accumulate in storage
 // until Resume is called. Pause is idempotent.

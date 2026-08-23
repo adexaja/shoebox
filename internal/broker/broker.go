@@ -85,9 +85,10 @@ type Broker struct {
 	// qDraining holds per-queue drain flags. When set, the dispatcher for
 	// that queue enters per-queue drain mode: process to quiescence, then
 	// stop only that queue (not the whole broker).
-	qDraining   map[string]*atomic.Bool
-	drainDone   map[string]chan struct{}
-	qDrainingMu sync.Mutex
+	qDraining     map[string]*atomic.Bool
+	drainDone     map[string]chan struct{}
+	scheduleStore storage.ScheduleStore
+	qDrainingMu   sync.Mutex
 }
 
 // New constructs a Broker.
@@ -108,7 +109,7 @@ func New(opts Options) *Broker {
 		// the internal constructor backward-compatible for existing callers.
 		dedupe = newTTLDedupeStore()
 	}
-	return &Broker{
+	b := &Broker{
 		store:         opts.Storage,
 		concurrency:   opts.Concurrency,
 		logger:        opts.Logger,
@@ -126,6 +127,12 @@ func New(opts Options) *Broker {
 		qDraining:     make(map[string]*atomic.Bool),
 		drainDone:     make(map[string]chan struct{}),
 	}
+	if schedules, ok := opts.Storage.(storage.ScheduleStore); ok {
+		b.scheduleStore = schedules
+		b.wg.Add(1)
+		go b.scheduleLoop()
+	}
+	return b
 }
 
 // Use registers middleware applied to every subsequently registered
@@ -733,4 +740,63 @@ func (b *Broker) signalDrainDone(queue string) {
 	if ch, ok := b.drainDone[queue]; ok {
 		close(ch)
 	}
+}
+
+func (b *Broker) scheduleLoop() {
+	defer b.wg.Done()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-b.stopCh:
+			return
+		case <-b.abortCh:
+			return
+		case <-ticker.C:
+			now := time.Now().UTC()
+			schedules, err := b.scheduleStore.DueSchedules(b.storeCtx(), now, 100)
+			if err != nil {
+				b.logger.ErrorContext(b.storeCtx(), "shoebox: schedule poll failed", slog.Any("err", err))
+				continue
+			}
+			for _, s := range schedules {
+				if s.Interval <= 0 {
+					continue
+				}
+				next := s.NextRunAt.Add(s.Interval)
+				for !next.After(now) {
+					next = next.Add(s.Interval)
+				}
+				claimed, err := b.scheduleStore.ClaimSchedule(b.storeCtx(), s.ID, now, next)
+				if err != nil || !claimed {
+					continue
+				}
+				if err := b.Enqueue(b.storeCtx(), s.Queue, s.Payload, EnqueueOpts{}); err != nil {
+					b.logger.ErrorContext(b.storeCtx(), "shoebox: periodic enqueue failed",
+						slog.String("id", s.ID), slog.Any("err", err))
+				}
+			}
+		}
+	}
+}
+
+func (b *Broker) RegisterPeriodic(ctx context.Context, s storage.Schedule) error {
+	if b.scheduleStore == nil {
+		return errors.New("shoebox: periodic jobs require a schedule-capable storage backend")
+	}
+	return b.scheduleStore.CreateSchedule(ctx, s)
+}
+
+func (b *Broker) RemovePeriodic(ctx context.Context, id string) error {
+	if b.scheduleStore == nil {
+		return errors.New("shoebox: periodic jobs require a schedule-capable storage backend")
+	}
+	return b.scheduleStore.DeleteSchedule(ctx, id)
+}
+
+func (b *Broker) PeriodicJobs(ctx context.Context, queue string) ([]storage.Schedule, error) {
+	if b.scheduleStore == nil {
+		return nil, errors.New("shoebox: periodic jobs require a schedule-capable storage backend")
+	}
+	return b.scheduleStore.ListSchedules(ctx, queue)
 }
