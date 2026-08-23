@@ -184,7 +184,7 @@ func (p *Postgres) Dequeue(ctx context.Context, queue string, limit int) ([]Mess
 		`SELECT id, payload, attempts, max_retries, created_at, scheduled_at, metadata, error, dead_at, priority
 		 FROM shoebox_messages
 		 WHERE queue = $1 AND status = 'pending' AND scheduled_at <= now()
-		 ORDER BY priority DESC, created_at ASC
+		 ORDER BY priority DESC, created_at DESC
 		 LIMIT $2
 		 FOR UPDATE SKIP LOCKED`,
 		queue, limit)
