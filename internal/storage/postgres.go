@@ -444,10 +444,10 @@ func (p *Postgres) Stats(ctx context.Context, queue string) (QueueStats, error) 
 			return QueueStats{}, fmt.Errorf("shoebox/postgres: stats query: %w", err)
 		}
 	}
-	s.Processed = uint64(processed)
-	s.Errors = uint64(errs)
-	s.Retries = uint64(retries)
-	s.Dead = uint64(dead)
+	s.Processed = nonNegativeUint64(processed)
+	s.Errors = nonNegativeUint64(errs)
+	s.Retries = nonNegativeUint64(retries)
+	s.Dead = nonNegativeUint64(dead)
 
 	var depth int
 	if err := p.pool.QueryRow(ctx,

@@ -12,10 +12,11 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"math/rand"
+	"math/big"
 	"os"
 	"strconv"
 	"time"
@@ -52,7 +53,11 @@ func main() {
 		}
 
 		// Simulate flaky SMTP: 20% chance of failure.
-		if rand.Intn(5) == 0 {
+		n, err := rand.Int(rand.Reader, big.NewInt(5))
+		if err != nil {
+			return fmt.Errorf("smtp: random failure simulation: %w", err)
+		}
+		if n.Sign() == 0 {
 			return fmt.Errorf("smtp: transient failure for %s (attempt %d)", e.To, msg.Attempts+1)
 		}
 

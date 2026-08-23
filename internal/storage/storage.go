@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"strconv"
 	"time"
 )
 
@@ -46,10 +47,18 @@ type Schedule struct {
 	Payload        []byte
 	EnqueueOptions []byte
 	Interval       time.Duration
-	NextRunAt      time.Time
-	Enabled        bool
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+
+	NextRunAt time.Time
+	Enabled   bool
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+func nonNegativeUint64(v int64) uint64 {
+	if v < 0 {
+		return 0
+	}
+	return uint64(v)
 }
 
 // ScheduleStore persists periodic enqueue definitions.
@@ -110,10 +119,7 @@ func NewMessageID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		now := time.Now().UnixNano()
-		return "ts-" + hex.EncodeToString([]byte{
-			byte(now >> 56), byte(now >> 48), byte(now >> 40), byte(now >> 32),
-			byte(now >> 24), byte(now >> 16), byte(now >> 8), byte(now),
-		})
+		return "ts-" + hex.EncodeToString([]byte(strconv.FormatInt(now, 10)))
 	}
 	return hex.EncodeToString(b[:])
 }
