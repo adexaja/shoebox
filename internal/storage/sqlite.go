@@ -152,6 +152,17 @@ func NewSQLite(ctx context.Context, path string) (*SQLite, error) {
 		return nil, fmt.Errorf("shoebox/sqlite: open %s: %w", path, err)
 	}
 
+	if path != ":memory:" {
+		if _, err := db.ExecContext(ctx, "PRAGMA journal_mode = WAL"); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("shoebox/sqlite: enable WAL: %w", err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout = 5000"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("shoebox/sqlite: set busy timeout: %w", err)
+	}
+
 	// SQLite is single-writer; a small pool is fine. The defaults
 	// (unlimited open, 2 idle) work but let's be explicit.
 	db.SetMaxOpenConns(1) // SQLite serialises writes anyway

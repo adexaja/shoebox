@@ -105,7 +105,7 @@ func main() {
 | Backend | Configuration | Survives restart | Notes |
 |---------|---------------|------------------|-------|
 | Memory | `shoebox.Memory` | No | In-process storage protected by a mutex. Useful for tests and local development. |
-| SQLite | `shoebox.SQLite` and `Options.Path` | Yes | Uses the pure-Go `modernc.org/sqlite` driver; no CGo. Recovers messages using the status lifecycle. |
+| SQLite | `shoebox.SQLite` and `Options.Path` | Yes | Uses pure-Go `modernc.org/sqlite` with WAL and a 5-second busy timeout; concurrent readers and serialized writers work across processes. It is not a replacement for PostgreSQL for high-throughput multi-process workloads. |
 | PostgreSQL | `shoebox.Postgres` and `Options.DSN` | Yes | Uses `pgx/v5` and a connection pool. Concurrent consumers claim work with `SELECT … FOR UPDATE SKIP LOCKED`. |
 
 SQLite example:

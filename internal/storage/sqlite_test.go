@@ -389,3 +389,68 @@ func TestSQLite_MigrationUpgradeFromV1(t *testing.T) {
 		t.Fatalf("user_version after upgrade = %d, want 4", version)
 	}
 }
+
+func TestSQLiteWALAndBusyTimeout(t *testing.T) {
+	s, err := NewSQLite(context.Background(), filepath.Join(t.TempDir(), "wal.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	var journal string
+	if err := s.db.QueryRow(`PRAGMA journal_mode`).Scan(&journal); err != nil {
+		t.Fatal(err)
+	}
+	if journal != "wal" {
+		t.Fatalf("journal mode = %q, want wal", journal)
+	}
+	var timeout int
+	if err := s.db.QueryRow(`PRAGMA busy_timeout`).Scan(&timeout); err != nil {
+		t.Fatal(err)
+	}
+	if timeout != 5000 {
+		t.Fatalf("busy timeout = %d, want 5000", timeout)
+	}
+}
+
+func TestSQLiteConcurrentFileHandles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "concurrent.db")
+	s1, err := NewSQLite(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s1.Close() }()
+	s2, err := NewSQLite(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s2.Close() }()
+	ctx := context.Background()
+	done := make(chan error, 2)
+	for _, s := range []*SQLite{s1, s2} {
+		go func(s *SQLite) {
+			for i := 0; i < 50; i++ {
+				if err := s.Enqueue(ctx, "concurrent", Message{ID: NewMessageID(), Payload: []byte("x")}); err != nil {
+					done <- err
+					return
+				}
+			}
+			done <- nil
+		}(s)
+	}
+	for range 2 {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := 0
+	for got < 100 {
+		msgs, err := s1.Dequeue(ctx, "concurrent", 100)
+		if err == ErrEmpty {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		got += len(msgs)
+	}
+}
