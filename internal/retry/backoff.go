@@ -24,7 +24,7 @@ func (c constant) Next(attempt int) time.Duration { return time.Duration(c) }
 // Exponential returns min(base * 2^(attempt-1), max). Attempt is 1-indexed,
 // so the first retry waits `base`, the second `2*base`, and so on.
 //
-// This is the default backoff in v0.1.
+// Handlers that do not configure a Backoff get exponential 1s..60s.
 func Exponential(base, max time.Duration) Backoff {
 	return exponential{base: base, max: max}
 }

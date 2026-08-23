@@ -1,8 +1,8 @@
 // Package api serves the HTTP API for shoebox's standalone-server mode
 // (shoeboxd). The handlers are a thin adapter over the storage and dlq
-// packages — they contain no queue logic of their own (ADR 0003).
+// packages — they contain no queue logic of their own.
 //
-// Endpoints (PRD §v0.2 §7):
+// Endpoints:
 //
 //	POST   /queues/{name}/messages         enqueue a message
 //	GET    /queues/{name}/messages/next    consume one message (pull-based)

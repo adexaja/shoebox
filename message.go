@@ -14,8 +14,8 @@ import "github.com/adexaja/shoebox/internal/storage"
 // configured backoff.
 //
 // Message is an alias for storage.Message so the public API and the storage
-// layer share a single struct definition. This avoids translation code in the
-// hot path; see ADR 0001.
+// layer share a single struct definition. This avoids translation code in
+// the hot path.
 type Message = storage.Message
 
 // QueueStats is what Stats returns. Counters are cumulative since the broker

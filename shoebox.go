@@ -1,6 +1,5 @@
 // Package shoebox is an embedded message queue for Go. See the README for a
-// quick start and the parent docs/ directory (epics, user stories, ADRs) for
-// the longer story.
+// quick start, storage options, and operational behavior.
 package shoebox
 
 import (
@@ -112,11 +111,9 @@ func (q *Queue) Handle(queue string, h HandlerFunc, opts ...HandlerOptions) {
 }
 
 // Enqueue adds a message to the queue. The call returns once the message is
-// durably stored (or, for Memory, in the in-process ring buffer). It does
-// not wait for the handler to run.
-//
-// Per ADR 0002 (fire-and-forget), Enqueue does not return a delivery
-// promise; use Shutdown to wait for in-flight messages.
+// durably stored (or, for Memory, in the in-process ring buffer); it is
+// fire-and-forget and does not wait for the handler to run. Use Shutdown
+// to wait for in-flight messages.
 func (q *Queue) Enqueue(queue string, payload []byte, opts ...EnqueueOpt) error {
 	if !naming.ValidQueueName(queue) {
 		return fmt.Errorf("shoebox: invalid queue name %q", queue)

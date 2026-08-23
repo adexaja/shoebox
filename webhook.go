@@ -14,11 +14,11 @@ import (
 	"time"
 )
 
-// Webhook push delivery (PRD §v0.2 §7.4, E4-S3): per-queue delivery to an HTTP
-// endpoint. It is implemented as a plain HandlerFunc, so the broker's
-// retry/backoff/DLQ machinery applies unchanged — a non-2xx response returns an
-// error, which the dispatcher turns into a Nack (backoff) and eventually a
-// dead-letter. Register it per queue with:
+// Webhook push delivery: each message on the queue is POSTed to a
+// configured HTTP endpoint. It is implemented as a plain HandlerFunc, so
+// the broker's retry/backoff/DLQ machinery applies unchanged — a non-2xx
+// response returns an error, which the dispatcher turns into a Nack
+// (backoff) and eventually a dead-letter. Register it per queue with:
 //
 //	q.Handle("orders", shoebox.WebhookHandler("https://hooks.example.com/orders"))
 

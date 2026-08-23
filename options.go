@@ -77,10 +77,9 @@ type HandlerOptions struct {
 	Backoff retry.Backoff
 
 	// Timeout is the per-message deadline handed to the handler via its
-	// context. Zero means no deadline (the handler runs until it returns).
-	// A non-zero Timeout is what lets Shutdown actually complete when a
-	// handler is wedged — without it, a blocked handler hangs the drain
-	// forever. See ADR 0002 (drain amendment).
+	// context. Zero means no deadline (the handler runs until it returns);
+	// a non-zero Timeout is what lets Shutdown and Drain complete even
+	// when a handler is blocked.
 	Timeout time.Duration
 }
 
@@ -93,11 +92,16 @@ type EnqueueOptions struct {
 	// and Schedule are set, Schedule wins.
 	Schedule time.Time
 
-	// DedupeKey, when set, suppresses enqueues of messages with the same key
-	// within the configured window. Implemented in v0.3.
+	// DedupeKey, when set, suppresses enqueues of messages with the same
+	// queue and key within the dedupe window (five minutes by default,
+	// bounded by DedupeOptions). A duplicate is dropped silently: Enqueue
+	// returns nil and nothing is written to storage. Dedupe state is
+	// in-memory and does not survive a restart.
 	DedupeKey string
 
-	// Priority is the v0.3 priority field. Reserved; ignored in v0.1.
+	// Priority orders delivery within the queue: higher-priority messages
+	// are dequeued first, ties break FIFO by created_at. The default (Low)
+	// preserves plain FIFO order.
 	Priority Priority
 
 	// Metadata is shallow-copied onto the enqueued message. Use WithMetadata
@@ -105,7 +109,7 @@ type EnqueueOptions struct {
 	Metadata map[string]string
 }
 
-// Priority is reserved for v0.3 priority queues.
+// Priority is a delivery-ordering hint within a single queue.
 type Priority int
 
 const (
@@ -128,7 +132,9 @@ func Schedule(t time.Time) EnqueueOpt {
 }
 
 // DedupeKey returns an option that tags the message for de-duplication.
-// Implemented in v0.3; the value is preserved in metadata for now.
+// Enqueues carrying a key already seen (same queue) within the dedupe
+// window are dropped silently. See EnqueueOptions.DedupeKey for the
+// guarantees and limits.
 func DedupeKey(k string) EnqueueOpt {
 	return func(o *EnqueueOptions) { o.DedupeKey = k }
 }
@@ -149,12 +155,7 @@ func WithMetadata(m map[string]string) EnqueueOpt {
 	}
 }
 
-// WithPriority returns an option that sets the v0.3 priority hint. Reserved
-// for future use; the broker does not act on the value in v0.1.
-//
-// The PRD sketch writes `shoebox.Priority(shoebox.High)`; we expose
-// `WithPriority` to keep `Priority` free as a type name. The call site is
-// therefore:
+// WithPriority returns an option that sets the message's priority:
 //
 //	q.Enqueue("orders", payload, shoebox.WithPriority(shoebox.High))
 func WithPriority(p Priority) EnqueueOpt {
