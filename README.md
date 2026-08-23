@@ -347,3 +347,18 @@ MIT — see [LICENSE](LICENSE).
 Shoebox is actively developed. The public API is intended for embedded queues,
 workers, and standalone-server use cases. Contributions and bug reports are
 welcome.
+
+## Versioning
+
+Shoebox follows semantic versioning:
+
+- While the module is below v1.0, minor releases may contain breaking API
+  changes.
+- Deprecations receive one minor release of notice when practical.
+- Patch releases are bug-fix releases.
+- v1.0 begins the Go 1 compatibility promise for the public API.
+
+The v1.0 exit criteria are automatic persistent schema upgrades, PostgreSQL
+integration tests in CI, release automation, documented SQLite behavior, and
+a stable period after the v0.3 feature set. Shoebox does not promise
+exactly-once delivery or durable deduplication before those features exist.
