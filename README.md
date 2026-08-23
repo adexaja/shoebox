@@ -10,6 +10,25 @@ separate broker to deploy.
 
 Coverage is generated in CI and uploaded to [Codecov](https://codecov.io/gh/adexaja/shoebox).
 
+## Benchmark snapshot
+
+The following medians were measured locally on 2026-08-24 with Go 1.27 on
+`AMD Ryzen 5 7430U with Radeon Graphics`, using
+`go test ./... -run '^$' -bench ... -benchmem -count=3`:
+
+| Benchmark | ns/op | B/op | allocs/op |
+|-----------|------:|-----:|----------:|
+| Broker memory throughput | 104,559 | 1,618 | 7 |
+| Broker SQLite throughput | 279,590 | 5,795 | 137 |
+| Memory enqueue | 443 | 1,205 | 1 |
+| Memory dequeue steady state | 13,906 | 504 | 6 |
+| Memory dequeue batch | 186,825 | 26,230 | 303 |
+| SQLite enqueue | 54,561 | 1,185 | 24 |
+| SQLite dequeue | 580,025 | 5,061 | 130 |
+
+PostgreSQL benchmarks run in the scheduled benchmark workflow with its
+PostgreSQL service container; they are not included in this local snapshot.
+
 ## Install shoeboxd
 
 Install the standalone server command with:
