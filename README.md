@@ -231,6 +231,20 @@ its TTL expires. A duplicate message may therefore be accepted again after
 capacity-based eviction. Deduplication is best-effort and in-memory; it is not
 durable exactly-once delivery.
 
+For PostgreSQL, `DedupePolicyDurable` stores the key with the message and
+enforces suppression with a partial unique index while the message is pending
+or processing. The guarantee survives restarts and concurrent writers; the
+key becomes reusable after acknowledgement or dead-lettering. This policy is
+rejected for Memory and SQLite, which continue to use the in-memory policies.
+
+```go
+q, _ := shoebox.New(shoebox.Options{
+    Storage: shoebox.Postgres,
+    DSN: "host=localhost port=5432 dbname=shoebox user=postgres sslmode=disable",
+    Dedupe: shoebox.DedupeOptions{Policy: shoebox.DedupePolicyDurable},
+})
+```
+
 ## Shutdown and queue control
 
 `Shutdown(ctx)` waits for in-flight handlers, including follow-up messages they

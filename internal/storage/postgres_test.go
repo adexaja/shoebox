@@ -521,8 +521,8 @@ func TestPostgres_MigrationUpgradeFromV1(t *testing.T) {
 		`SELECT MAX(version) FROM shoebox_schema_migrations`).Scan(&version); err != nil {
 		t.Fatalf("read version: %v", err)
 	}
-	if version != 3 {
-		t.Fatalf("schema version after upgrade = %d, want 3", version)
+	if version != 4 {
+		t.Fatalf("schema version after upgrade = %d, want 4", version)
 	}
 }
 
@@ -577,8 +577,8 @@ func TestPostgres_ConcurrentOpenMigratesOnce(t *testing.T) {
 		`SELECT COUNT(*) FROM shoebox_schema_migrations`).Scan(&rows); err != nil {
 		t.Fatal(err)
 	}
-	if rows != 3 {
-		t.Fatalf("migration rows after %d concurrent opens = %d, want 3", openers, rows)
+	if rows != 4 {
+		t.Fatalf("migration rows after %d concurrent opens = %d, want 4", openers, rows)
 	}
 
 	// Every opener's enqueue survived: migration and message traffic did

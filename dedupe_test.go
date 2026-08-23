@@ -119,3 +119,13 @@ func TestDedupe_PerQueueIsolation(t *testing.T) {
 		t.Fatalf("delivered %d messages, want 2 (per-queue isolation failed)", got)
 	}
 }
+
+func TestDedupe_DurableRequiresPostgres(t *testing.T) {
+	for _, kind := range []StorageKind{Memory, SQLite} {
+		opts := Options{Storage: kind, Path: t.TempDir() + "/queue.db",
+			Dedupe: DedupeOptions{Policy: DedupePolicyDurable}}
+		if _, err := New(opts); err == nil {
+			t.Fatalf("durable dedupe accepted for storage %d", kind)
+		}
+	}
+}

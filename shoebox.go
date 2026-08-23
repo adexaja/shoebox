@@ -35,8 +35,12 @@ func New(opts Options) (*Queue, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
-	if opts.Dedupe.Policy != "" && opts.Dedupe.Policy != DedupePolicyUnboundedTTL && opts.Dedupe.Policy != DedupePolicyBoundedLRU {
+	if opts.Dedupe.Policy != "" && opts.Dedupe.Policy != DedupePolicyUnboundedTTL &&
+		opts.Dedupe.Policy != DedupePolicyBoundedLRU && opts.Dedupe.Policy != DedupePolicyDurable {
 		return nil, fmt.Errorf("shoebox: unsupported dedupe policy %q", opts.Dedupe.Policy)
+	}
+	if opts.Dedupe.Policy == DedupePolicyDurable && opts.Storage != Postgres {
+		return nil, fmt.Errorf("shoebox: durable dedupe requires Postgres storage")
 	}
 
 	store, err := buildStorage(context.Background(), opts)
@@ -55,6 +59,7 @@ func New(opts Options) (*Queue, error) {
 				Capacity: opts.Dedupe.Capacity,
 			},
 			DedupeMetrics: metrics,
+			DurableDedupe: opts.Dedupe.Policy == DedupePolicyDurable,
 		}),
 		metrics:  metrics,
 		registry: opts.MetricsRegistry,

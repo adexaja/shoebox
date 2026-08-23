@@ -239,10 +239,11 @@ func (p *Postgres) Enqueue(ctx context.Context, queue string, msg Message) error
 		status = "dead"
 	}
 	_, err = p.pool.Exec(ctx, `INSERT INTO shoebox_messages
-		(id, queue, payload, attempts, max_retries, created_at, scheduled_at, priority, metadata, error, dead_at, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		(id, queue, payload, attempts, max_retries, created_at, scheduled_at, priority, dedupe_key, metadata, error, dead_at, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		ON CONFLICT DO NOTHING`,
 		msg.ID, queue, payload, msg.Attempts, msg.MaxRetries,
-		msg.CreatedAt, msg.ScheduledAt, msg.Priority, meta, msg.Error, deadAt,
+		msg.CreatedAt, msg.ScheduledAt, msg.Priority, msg.DedupeKey, meta, msg.Error, deadAt,
 		status,
 	)
 	if err != nil {
@@ -263,7 +264,7 @@ func (p *Postgres) Dequeue(ctx context.Context, queue string, limit int) ([]Mess
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	rows, err := tx.Query(ctx,
-		`SELECT id, payload, attempts, max_retries, created_at, scheduled_at, metadata, error, dead_at, priority
+		`SELECT id, payload, attempts, max_retries, created_at, scheduled_at, dedupe_key, metadata, error, dead_at, priority
 		 FROM shoebox_messages
 		 WHERE queue = $1 AND status = 'pending' AND scheduled_at <= now()
 		 ORDER BY priority DESC, created_at ASC
@@ -386,7 +387,7 @@ func (p *Postgres) Dead(ctx context.Context, queue, msgID string, deadErr error)
 // List returns up to `limit` dead messages from a queue (DLQ inspection).
 func (p *Postgres) List(ctx context.Context, queue string, limit int) ([]Message, error) {
 	rows, err := p.pool.Query(ctx,
-		`SELECT id, payload, attempts, max_retries, created_at, scheduled_at, metadata, error, dead_at, priority
+		`SELECT id, payload, attempts, max_retries, created_at, scheduled_at, dedupe_key, metadata, error, dead_at, priority
 		 FROM shoebox_messages
 		 WHERE queue = $1 AND status = 'dead'
 		 ORDER BY dead_at DESC
@@ -477,7 +478,7 @@ func scanPostgresMessage(rows pgx.Rows) (Message, error) {
 
 	if err := rows.Scan(
 		&m.ID, &m.Payload, &m.Attempts, &m.MaxRetries,
-		&m.CreatedAt, &m.ScheduledAt, &metaBytes, &m.Error, &deadAt.val,
+		&m.CreatedAt, &m.ScheduledAt, &m.DedupeKey, &metaBytes, &m.Error, &deadAt.val,
 		&m.Priority,
 	); err != nil {
 		return m, err
