@@ -47,6 +47,34 @@ func NewPostgres(ctx context.Context, dsn string, schemas ...string) (*Postgres,
 		return nil, fmt.Errorf("shoebox/postgres: parse dsn: %w", err)
 	}
 
+	// Serialize schema creation across concurrent queue instances. The
+	// transaction-scoped advisory lock prevents a pg_namespace duplicate-key
+	// race when several pools bootstrap the same schema simultaneously.
+	bootstrap, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		return nil, fmt.Errorf("shoebox/postgres: bootstrap connect: %w", err)
+	}
+	tx, err := bootstrap.Begin(ctx)
+	if err != nil {
+		_ = bootstrap.Close(ctx)
+		return nil, fmt.Errorf("shoebox/postgres: bootstrap transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	lockKey := "shoebox:schema:create:" + schema
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lockKey); err != nil {
+		_ = bootstrap.Close(ctx)
+		return nil, fmt.Errorf("shoebox/postgres: schema lock: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS "+quotedSchema); err != nil {
+		_ = bootstrap.Close(ctx)
+		return nil, fmt.Errorf("shoebox/postgres: create schema: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		_ = bootstrap.Close(ctx)
+		return nil, fmt.Errorf("shoebox/postgres: bootstrap commit: %w", err)
+	}
+	_ = bootstrap.Close(ctx)
+
 	// Sensible pool defaults for shoebox's target scale (hundreds to low
 	// thousands of msgs/min). Users with higher throughput can tune via
 	// the DSN's pool_max_conns etc.
@@ -57,9 +85,6 @@ func NewPostgres(ctx context.Context, dsn string, schemas ...string) (*Postgres,
 	// A pool can create connections after startup, so configure the schema on
 	// every connection rather than changing only the connection used below.
 	config.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
-		if _, err := conn.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS "+quotedSchema); err != nil {
-			return err
-		}
 		_, err := conn.Exec(ctx, "SET search_path TO "+quotedSchema)
 		return err
 	}

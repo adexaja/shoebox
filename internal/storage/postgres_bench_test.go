@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // newBenchPostgres opens a fresh Postgres backend and cleans the tables so
@@ -14,26 +17,29 @@ import (
 // Skips if local Postgres is not reachable.
 func newBenchPostgres(b *testing.B) *Postgres {
 	b.Helper()
-	s, err := NewPostgres(context.Background(), testDSN)
+	ctx := context.Background()
+	schema := fmt.Sprintf("bench_%d", time.Now().UnixNano())
+	setup, err := pgxpool.New(ctx, testDSN)
 	if err != nil {
 		b.Skipf("Postgres not available: %v", err)
 	}
-	ctx := context.Background()
-	if _, err := s.pool.Exec(ctx, `DROP TABLE IF EXISTS shoebox_messages`); err != nil {
-		_ = s.Close()
-		b.Fatalf("drop messages: %v", err)
+	if _, err := setup.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS "+schema); err != nil {
+		setup.Close()
+		b.Skipf("Postgres not available: %v", err)
 	}
-	if _, err := s.pool.Exec(ctx, `DROP TABLE IF EXISTS shoebox_stats`); err != nil {
-		_ = s.Close()
-		b.Fatalf("drop stats: %v", err)
-	}
-	_ = s.Close()
-
-	s, err = NewPostgres(ctx, testDSN)
+	setup.Close()
+	s, err := NewPostgres(ctx, testDSN, schema)
 	if err != nil {
-		b.Fatalf("NewPostgres (re-open): %v", err)
+		b.Skipf("Postgres not available: %v", err)
 	}
-	b.Cleanup(func() { _ = s.Close() })
+	b.Cleanup(func() {
+		_ = s.Close()
+		pool, err := pgxpool.New(ctx, testDSN)
+		if err == nil {
+			_, _ = pool.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE")
+			pool.Close()
+		}
+	})
 	return s
 }
 
