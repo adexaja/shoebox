@@ -7,6 +7,12 @@ and releases follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed PostgreSQL upgrades from the v0.1.6 schema and repaired databases
+  whose v0.1.7 migration marker skipped the schedule and durable-dedupe
+  objects.
+
 ### Added
 
 - Release automation for server binaries and the container image.

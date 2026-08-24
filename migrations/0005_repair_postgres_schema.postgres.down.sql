@@ -1,0 +1,3 @@
+-- 0005_repair_postgres_schema.postgres.down.sql
+-- This repair migration is intentionally irreversible: its objects belong to
+-- migrations 0003 and 0004, and dropping them would destroy live data.

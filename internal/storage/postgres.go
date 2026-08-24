@@ -136,7 +136,8 @@ func quotePostgresIdentifier(identifier string) (string, error) {
 //
 // Databases created before the migration runner existed have no version
 // table; their baseline is detected once from the live schema and recorded
-// (see appliedPostgresVersion).
+// (see appliedPostgresVersion). A version marker at 4 is repaired by
+// migration 0005 when its 0003/0004 artifacts are missing.
 func initPostgresSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	ups, err := migrations.Up("postgres")
 	if err != nil {
@@ -189,11 +190,13 @@ func initPostgresSchema(ctx context.Context, pool *pgxpool.Pool) error {
 
 // appliedPostgresVersion returns the schema version the database is at.
 // When the version table has no rows the database predates the migration
-// runner: a shoebox_messages table without a priority column matches
-// migration 0001 only (baseline 1), one with it matches the last
-// hand-embedded schema (baseline = latest), and no shoebox tables at all
-// means a fresh database (baseline 0). Detected baselines are recorded so
-// later opens read a single row instead of re-detecting.
+// runner. The live schema identifies the highest complete legacy migration:
+// no shoebox tables means a fresh database (baseline 0), a messages table
+// without priority matches 0001 (baseline 1), priority without the 0003
+// schedule table matches 0002, and the 0003/0004 artifacts advance the
+// baseline to 3/4. Detected baselines are recorded so later opens read a
+// single row instead of re-detecting. Migration 0005 repairs databases that
+// already recorded version 4 before those artifacts existed.
 func appliedPostgresVersion(ctx context.Context, tx pgx.Tx, latest int) (int, error) {
 	var rows int
 	if err := tx.QueryRow(ctx,
@@ -219,15 +222,50 @@ func appliedPostgresVersion(ctx context.Context, tx pgx.Tx, latest int) (int, er
 		return 0, nil
 	}
 
-	baseline := 1
-	var cols int
-	if err := tx.QueryRow(ctx,
-		`SELECT COUNT(*) FROM information_schema.columns
-		 WHERE table_schema = current_schema() AND table_name = 'shoebox_messages'
-		   AND column_name = 'priority'`).Scan(&cols); err != nil {
+	var priority, schedules, dedupe, dedupeIndex bool
+	if err := tx.QueryRow(ctx, `
+		SELECT
+			EXISTS (
+				SELECT 1
+				FROM information_schema.columns
+				WHERE table_schema = current_schema()
+				  AND table_name = 'shoebox_messages'
+				  AND column_name = 'priority'
+			),
+			EXISTS (
+				SELECT 1
+				FROM information_schema.tables
+				WHERE table_schema = current_schema()
+				  AND table_name = 'shoebox_schedules'
+			),
+			EXISTS (
+				SELECT 1
+				FROM information_schema.columns
+				WHERE table_schema = current_schema()
+				  AND table_name = 'shoebox_messages'
+				  AND column_name = 'dedupe_key'
+			),
+			EXISTS (
+				SELECT 1
+				FROM pg_indexes
+				WHERE schemaname = current_schema()
+				  AND tablename = 'shoebox_messages'
+				  AND indexname = 'idx_shoebox_durable_dedupe'
+			)`).Scan(&priority, &schedules, &dedupe, &dedupeIndex); err != nil {
 		return 0, err
 	}
-	if cols > 0 {
+
+	baseline := 1
+	if priority {
+		baseline = 2
+	}
+	if priority && schedules {
+		baseline = 3
+	}
+	if priority && schedules && dedupe && dedupeIndex {
+		baseline = 4
+	}
+	if baseline > latest {
 		baseline = latest
 	}
 	if _, err := tx.Exec(ctx,
