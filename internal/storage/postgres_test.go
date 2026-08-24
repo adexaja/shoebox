@@ -64,7 +64,7 @@ func newTestPostgres(t *testing.T) *Postgres {
 	// would trust its recorded version and skip rebuilding the schema.
 	ctx := context.Background()
 	for _, table := range []string{
-		"shoebox_messages", "shoebox_stats", "shoebox_schema_migrations",
+		"shoebox_messages", "shoebox_stats", "shoebox_schedules", "shoebox_schema_migrations",
 	} {
 		if _, err := s.pool.Exec(ctx, "DROP TABLE IF EXISTS "+table); err != nil {
 			_ = s.Close()
@@ -472,7 +472,7 @@ func upMigration(t *testing.T, dialect string, version int) migrations.Migration
 func dropPostgresTables(t *testing.T, s *Postgres) {
 	t.Helper()
 	for _, table := range []string{
-		"shoebox_messages", "shoebox_stats", "shoebox_schema_migrations",
+		"shoebox_messages", "shoebox_stats", "shoebox_schedules", "shoebox_schema_migrations",
 	} {
 		if _, err := s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS "+table); err != nil {
 			t.Fatalf("drop %s: %v", table, err)
@@ -480,10 +480,37 @@ func dropPostgresTables(t *testing.T, s *Postgres) {
 	}
 }
 
+// assertPostgresMigrationVersions checks the exact version markers recorded
+// after a migration run.
+func assertPostgresMigrationVersions(t *testing.T, s *Postgres, want ...int) {
+	t.Helper()
+	rows, err := s.pool.Query(context.Background(),
+		`SELECT version FROM shoebox_schema_migrations ORDER BY version`)
+	if err != nil {
+		t.Fatalf("read migration versions: %v", err)
+	}
+	defer rows.Close()
+
+	var got []int
+	for rows.Next() {
+		var version int
+		if err := rows.Scan(&version); err != nil {
+			t.Fatalf("scan migration version: %v", err)
+		}
+		got = append(got, version)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate migration versions: %v", err)
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("migration versions = %v, want %v", got, want)
+	}
+}
+
 // TestPostgres_MigrationUpgradeFromV1 simulates a database created before
 // the migration runner existed, carrying only the 0001 schema (no priority
 // column, no version rows). Opening it with the current library must detect
-// the legacy baseline, apply 0002, and end up fully functional.
+// the legacy baseline, apply 0002 through 0005, and end up fully functional.
 func TestPostgres_MigrationUpgradeFromV1(t *testing.T) {
 	skipIfNoPostgres(t)
 	ctx := context.Background()
@@ -497,7 +524,7 @@ func TestPostgres_MigrationUpgradeFromV1(t *testing.T) {
 	_ = s0.Close()
 
 	// Open with the current library: baseline detection must record 1 and
-	// migration 0002 must be applied on open.
+	// migrations 0002 through 0005 must be applied on open.
 	s, err := NewPostgres(ctx, testDSN)
 	if err != nil {
 		t.Fatalf("NewPostgres on v1 database: %v", err)
@@ -521,8 +548,147 @@ func TestPostgres_MigrationUpgradeFromV1(t *testing.T) {
 		`SELECT MAX(version) FROM shoebox_schema_migrations`).Scan(&version); err != nil {
 		t.Fatalf("read version: %v", err)
 	}
-	if version != 4 {
-		t.Fatalf("schema version after upgrade = %d, want 4", version)
+	if version != 5 {
+		t.Fatalf("schema version after upgrade = %d, want 5", version)
+	}
+}
+
+// TestPostgres_MigrationFreshDatabase verifies a clean database receives all
+// schema migrations and exposes both queue and schedule storage.
+func TestPostgres_MigrationFreshDatabase(t *testing.T) {
+	s := newTestPostgres(t)
+	ctx := context.Background()
+	assertPostgresMigrationVersions(t, s, 1, 2, 3, 4, 5)
+
+	mustPgEnqueue(t, s, "q", Message{ID: "fresh", Payload: []byte("fresh")})
+	if got, err := s.Dequeue(ctx, "q", 1); err != nil {
+		t.Fatalf("Dequeue after fresh migration: %v", err)
+	} else if len(got) != 1 || got[0].ID != "fresh" {
+		t.Fatalf("dequeue after fresh migration = %v, want [fresh]", ids(got))
+	}
+
+	now := time.Now()
+	if err := s.CreateSchedule(ctx, Schedule{
+		ID: "fresh-schedule", Queue: "q", Payload: []byte("scheduled"),
+		EnqueueOptions: []byte("{}"), Interval: time.Minute,
+		NextRunAt: now.Add(-time.Second), Enabled: true,
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateSchedule after fresh migration: %v", err)
+	}
+	due, err := s.DueSchedules(ctx, now, 1)
+	if err != nil {
+		t.Fatalf("DueSchedules after fresh migration: %v", err)
+	}
+	if len(due) != 1 || due[0].ID != "fresh-schedule" {
+		t.Fatalf("due schedules after fresh migration = %v, want [fresh-schedule]", due)
+	}
+}
+
+// TestPostgres_MigrationUpgradeFromV2 simulates the v0.1.6 schema: priority
+// exists, but the periodic-jobs and durable-dedupe artifacts do not.
+func TestPostgres_MigrationUpgradeFromV2(t *testing.T) {
+	skipIfNoPostgres(t)
+	ctx := context.Background()
+
+	s0 := newTestPostgres(t)
+	dropPostgresTables(t, s0)
+	for _, version := range []int{1, 2} {
+		if _, err := s0.pool.Exec(ctx, upMigration(t, "postgres", version).SQL); err != nil {
+			t.Fatalf("apply 000%d: %v", version, err)
+		}
+	}
+	_ = s0.Close()
+
+	s, err := NewPostgres(ctx, testDSN)
+	if err != nil {
+		t.Fatalf("NewPostgres on v2 database: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	assertPostgresMigrationVersions(t, s, 2, 3, 4, 5)
+
+	mustPgEnqueue(t, s, "q", Message{ID: "v2", Payload: []byte("v2")})
+	got, err := s.Dequeue(ctx, "q", 1)
+	if err != nil {
+		t.Fatalf("Dequeue after v2 upgrade: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "v2" {
+		t.Fatalf("dequeue after v2 upgrade = %v, want [v2]", ids(got))
+	}
+
+	now := time.Now()
+	if err := s.CreateSchedule(ctx, Schedule{
+		ID: "v2-schedule", Queue: "q", Payload: []byte("scheduled"),
+		EnqueueOptions: []byte("{}"), Interval: time.Minute,
+		NextRunAt: now.Add(-time.Second), Enabled: true,
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateSchedule after v2 upgrade: %v", err)
+	}
+	due, err := s.DueSchedules(ctx, now, 1)
+	if err != nil {
+		t.Fatalf("DueSchedules after v2 upgrade: %v", err)
+	}
+	if len(due) != 1 || due[0].ID != "v2-schedule" {
+		t.Fatalf("due schedules after v2 upgrade = %v, want [v2-schedule]", due)
+	}
+}
+
+// TestPostgres_MigrationRepairFromPoisonedVersion simulates the v0.1.7 bug:
+// the database claims version 4 while the 0003/0004 objects are absent.
+func TestPostgres_MigrationRepairFromPoisonedVersion(t *testing.T) {
+	skipIfNoPostgres(t)
+	ctx := context.Background()
+
+	s0 := newTestPostgres(t)
+	dropPostgresTables(t, s0)
+	for _, version := range []int{1, 2} {
+		if _, err := s0.pool.Exec(ctx, upMigration(t, "postgres", version).SQL); err != nil {
+			t.Fatalf("apply 000%d: %v", version, err)
+		}
+	}
+	if _, err := s0.pool.Exec(ctx, `CREATE TABLE shoebox_schema_migrations (
+		version INTEGER PRIMARY KEY,
+		applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`); err != nil {
+		t.Fatalf("create migration marker: %v", err)
+	}
+	if _, err := s0.pool.Exec(ctx, `INSERT INTO shoebox_schema_migrations (version) VALUES (4)`); err != nil {
+		t.Fatalf("insert poisoned migration marker: %v", err)
+	}
+	_ = s0.Close()
+
+	s, err := NewPostgres(ctx, testDSN)
+	if err != nil {
+		t.Fatalf("NewPostgres on poisoned database: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	assertPostgresMigrationVersions(t, s, 4, 5)
+
+	mustPgEnqueue(t, s, "q", Message{ID: "repaired", Payload: []byte("repaired")})
+	got, err := s.Dequeue(ctx, "q", 1)
+	if err != nil {
+		t.Fatalf("Dequeue after poisoned-version repair: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "repaired" {
+		t.Fatalf("dequeue after poisoned-version repair = %v, want [repaired]", ids(got))
+	}
+
+	now := time.Now()
+	if err := s.CreateSchedule(ctx, Schedule{
+		ID: "repaired-schedule", Queue: "q", Payload: []byte("scheduled"),
+		EnqueueOptions: []byte("{}"), Interval: time.Minute,
+		NextRunAt: now.Add(-time.Second), Enabled: true,
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateSchedule after poisoned-version repair: %v", err)
+	}
+	due, err := s.DueSchedules(ctx, now, 1)
+	if err != nil {
+		t.Fatalf("DueSchedules after poisoned-version repair: %v", err)
+	}
+	if len(due) != 1 || due[0].ID != "repaired-schedule" {
+		t.Fatalf("due schedules after poisoned-version repair = %v, want [repaired-schedule]", due)
 	}
 }
 
@@ -570,15 +736,15 @@ func TestPostgres_ConcurrentOpenMigratesOnce(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
-	// One row per applied migration (0001, 0002): the version primary key
-	// plus the advisory lock make duplicates impossible.
+	// One row per applied migration. The version primary key plus the
+	// advisory lock make duplicates impossible.
 	var rows int
 	if err := s.pool.QueryRow(ctx,
 		`SELECT COUNT(*) FROM shoebox_schema_migrations`).Scan(&rows); err != nil {
 		t.Fatal(err)
 	}
-	if rows != 4 {
-		t.Fatalf("migration rows after %d concurrent opens = %d, want 4", openers, rows)
+	if rows != 5 {
+		t.Fatalf("migration rows after %d concurrent opens = %d, want 5", openers, rows)
 	}
 
 	// Every opener's enqueue survived: migration and message traffic did
