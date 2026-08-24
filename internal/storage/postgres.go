@@ -47,6 +47,19 @@ func NewPostgres(ctx context.Context, dsn string, schemas ...string) (*Postgres,
 		return nil, fmt.Errorf("shoebox/postgres: parse dsn: %w", err)
 	}
 
+	// Create the schema once before opening the pool. Running CREATE SCHEMA
+	// from several concurrent AfterConnect callbacks can race on PostgreSQL's
+	// namespace catalog and report a duplicate-key error.
+	bootstrap, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		return nil, fmt.Errorf("shoebox/postgres: bootstrap connect: %w", err)
+	}
+	if _, err := bootstrap.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS "+quotedSchema); err != nil {
+		bootstrap.Close(ctx)
+		return nil, fmt.Errorf("shoebox/postgres: create schema: %w", err)
+	}
+	bootstrap.Close(ctx)
+
 	// Sensible pool defaults for shoebox's target scale (hundreds to low
 	// thousands of msgs/min). Users with higher throughput can tune via
 	// the DSN's pool_max_conns etc.
@@ -57,9 +70,6 @@ func NewPostgres(ctx context.Context, dsn string, schemas ...string) (*Postgres,
 	// A pool can create connections after startup, so configure the schema on
 	// every connection rather than changing only the connection used below.
 	config.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
-		if _, err := conn.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS "+quotedSchema); err != nil {
-			return err
-		}
 		_, err := conn.Exec(ctx, "SET search_path TO "+quotedSchema)
 		return err
 	}

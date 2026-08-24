@@ -22,13 +22,15 @@ benchmark used the local PostgreSQL service on the same machine.
 | Broker memory throughput | 104,559 | 1,618 | 7 |
 | Broker SQLite throughput | 279,590 | 5,795 | 137 |
 | Broker PostgreSQL throughput | 6,037,569 | 3,771 | 64 |
+| PostgreSQL enqueue | 3,005,703 | 587 | 16 |
+| PostgreSQL dequeue | 10,019,215 | 2,723 | 57 |
 | Memory enqueue | 443 | 1,205 | 1 |
 | Memory dequeue steady state | 13,906 | 504 | 6 |
 | Memory dequeue batch | 186,825 | 26,230 | 303 |
 | SQLite enqueue | 54,561 | 1,185 | 24 |
 | SQLite dequeue | 580,025 | 5,061 | 130 |
 
-The scheduled benchmark workflow runs the same PostgreSQL benchmark against
+The scheduled benchmark workflow runs the same PostgreSQL benchmarks against
 its service container and tracks regressions separately from this local
 snapshot.
 
