@@ -47,18 +47,33 @@ func NewPostgres(ctx context.Context, dsn string, schemas ...string) (*Postgres,
 		return nil, fmt.Errorf("shoebox/postgres: parse dsn: %w", err)
 	}
 
-	// Create the schema once before opening the pool. Running CREATE SCHEMA
-	// from several concurrent AfterConnect callbacks can race on PostgreSQL's
-	// namespace catalog and report a duplicate-key error.
+	// Serialize schema creation across concurrent queue instances. The
+	// transaction-scoped advisory lock prevents a pg_namespace duplicate-key
+	// race when several pools bootstrap the same schema simultaneously.
 	bootstrap, err := pgx.Connect(ctx, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("shoebox/postgres: bootstrap connect: %w", err)
 	}
-	if _, err := bootstrap.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS "+quotedSchema); err != nil {
-		bootstrap.Close(ctx)
+	tx, err := bootstrap.Begin(ctx)
+	if err != nil {
+		_ = bootstrap.Close(ctx)
+		return nil, fmt.Errorf("shoebox/postgres: bootstrap transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	lockKey := "shoebox:schema:create:" + schema
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lockKey); err != nil {
+		_ = bootstrap.Close(ctx)
+		return nil, fmt.Errorf("shoebox/postgres: schema lock: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS "+quotedSchema); err != nil {
+		_ = bootstrap.Close(ctx)
 		return nil, fmt.Errorf("shoebox/postgres: create schema: %w", err)
 	}
-	bootstrap.Close(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		_ = bootstrap.Close(ctx)
+		return nil, fmt.Errorf("shoebox/postgres: bootstrap commit: %w", err)
+	}
+	_ = bootstrap.Close(ctx)
 
 	// Sensible pool defaults for shoebox's target scale (hundreds to low
 	// thousands of msgs/min). Users with higher throughput can tune via
