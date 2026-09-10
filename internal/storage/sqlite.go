@@ -188,8 +188,15 @@ func NewSQLite(ctx context.Context, path string) (*SQLite, error) {
 	return s, nil
 }
 
-// Enqueue persists a new message with status 'pending'.
 func (s *SQLite) Enqueue(ctx context.Context, queue string, msg Message) error {
+	return enqueueSQLite(ctx, s.db, queue, msg)
+}
+
+type sqliteExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func enqueueSQLite(ctx context.Context, execer sqliteExecer, queue string, msg Message) error {
 	meta, err := json.Marshal(msg.Metadata)
 	if err != nil {
 		return fmt.Errorf("shoebox/sqlite: marshal metadata: %w", err)
@@ -200,8 +207,6 @@ func (s *SQLite) Enqueue(ctx context.Context, queue string, msg Message) error {
 	if msg.ScheduledAt.IsZero() {
 		msg.ScheduledAt = time.Now()
 	}
-	// Coalesce nil payload to empty []byte so SQLite's NOT NULL constraint
-	// is satisfied. A nil []byte would be stored as SQL NULL.
 	payload := msg.Payload
 	if payload == nil {
 		payload = []byte{}
@@ -210,7 +215,7 @@ func (s *SQLite) Enqueue(ctx context.Context, queue string, msg Message) error {
 	if strings.HasSuffix(queue, ".dlq") {
 		status = "dead"
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO shoebox_messages
+	_, err = execer.ExecContext(ctx, `INSERT INTO shoebox_messages
 		(id, queue, payload, attempts, max_retries, created_at, scheduled_at, priority, dedupe_key, metadata, error, dead_at, status)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		msg.ID, queue, payload, msg.Attempts, msg.MaxRetries,
@@ -305,60 +310,117 @@ func (s *SQLite) Ack(ctx context.Context, queue, msgID string) error {
 	return tx.Commit()
 }
 
-// Nack records a failed delivery. The broker re-enqueues the message with a
-// future ScheduledAt; this method just bumps the retry counter. The message
-// is transitioned back to 'pending' by the subsequent Enqueue (INSERT OR
-// REPLACE) or left in 'processing' if the broker hasn't re-enqueued yet.
-func (s *SQLite) Nack(ctx context.Context, queue, msgID string, nakErr error) error {
+// Retry records the failed delivery and persists the updated message for a
+// future delivery in one transaction.
+func (s *SQLite) Retry(ctx context.Context, queue string, msg Message, _ error) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("shoebox/sqlite: nack begin: %w", err)
+		return fmt.Errorf("shoebox/sqlite: retry begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM shoebox_messages WHERE id = ? AND queue = ?`, msgID, queue); err != nil {
-		return fmt.Errorf("shoebox/sqlite: nack delete: %w", err)
+	result, err := tx.ExecContext(ctx,
+		`DELETE FROM shoebox_messages WHERE id = ? AND queue = ? AND status = 'processing'`, msg.ID, queue)
+	if err != nil {
+		return fmt.Errorf("shoebox/sqlite: retry delete: %w", err)
+	}
+	if n, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("shoebox/sqlite: retry delete rows: %w", err)
+	} else if n != 1 {
+		return ErrEmpty
+	}
+	if err := enqueueSQLite(ctx, tx, queue, msg); err != nil {
+		return fmt.Errorf("shoebox/sqlite: retry enqueue: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO shoebox_stats (queue, processed, errors, retries, dead)
 		 VALUES (?, 0, 1, 1, 0)
 		 ON CONFLICT(queue) DO UPDATE SET errors = errors + 1, retries = retries + 1`,
 		queue); err != nil {
-		return fmt.Errorf("shoebox/sqlite: nack stats: %w", err)
+		return fmt.Errorf("shoebox/sqlite: retry stats: %w", err)
 	}
-
 	return tx.Commit()
 }
 
-// Dead marks a message as dead (DLQ). The message row is transitioned to
-// status='dead' with the last error and a timestamp, and the dead counter is
-// bumped. The broker has already set msg.Error and msg.DeadAt before calling.
-func (s *SQLite) Dead(ctx context.Context, queue, msgID string, deadErr error) error {
+// DeadLetter moves a failed message to its DLQ and records the terminal
+// outcome in one transaction.
+func (s *SQLite) DeadLetter(ctx context.Context, queue string, msg Message, handlerErr error) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("shoebox/sqlite: dead begin: %w", err)
+		return fmt.Errorf("shoebox/sqlite: dead-letter begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	errStr := ""
-	if deadErr != nil {
-		errStr = deadErr.Error()
+	dead := deadLetterMessage(queue, msg, handlerErr, time.Now().UTC())
+	if err := enqueueSQLite(ctx, tx, dead.Queue, dead); err != nil {
+		return fmt.Errorf("shoebox/sqlite: dead-letter enqueue: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx,
+	result, err := tx.ExecContext(ctx,
 		`UPDATE shoebox_messages SET status = 'dead', error = ?, dead_at = ?
-		 WHERE id = ? AND queue = ?`,
-		errStr, time.Now().Format(time.RFC3339Nano), msgID, queue); err != nil {
-		return fmt.Errorf("shoebox/sqlite: dead update: %w", err)
+		 WHERE id = ? AND queue = ? AND status = 'processing'`,
+		dead.Error, dead.DeadAt.Format(time.RFC3339Nano), msg.ID, queue)
+	if err != nil {
+		return fmt.Errorf("shoebox/sqlite: dead-letter update: %w", err)
+	}
+	if n, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("shoebox/sqlite: dead-letter update rows: %w", err)
+	} else if n != 1 {
+		return ErrEmpty
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO shoebox_stats (queue, processed, errors, retries, dead)
 		 VALUES (?, 0, 0, 0, 1)
 		 ON CONFLICT(queue) DO UPDATE SET dead = dead + 1`,
 		queue); err != nil {
-		return fmt.Errorf("shoebox/sqlite: dead stats: %w", err)
+		return fmt.Errorf("shoebox/sqlite: dead-letter stats: %w", err)
 	}
+	return tx.Commit()
+}
 
+// Replay moves a DLQ message back to its source queue in one transaction.
+func (s *SQLite) Replay(ctx context.Context, queue, msgID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("shoebox/sqlite: replay begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	row := tx.QueryRowContext(ctx,
+		`SELECT id, payload, attempts, max_retries, created_at, scheduled_at, dedupe_key, metadata, error, dead_at, priority
+		 FROM shoebox_messages
+		 WHERE id = ? AND queue = ? AND status = 'dead'`,
+		msgID, queue+".dlq")
+	msg, err := scanMessage(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrEmpty
+		}
+		return fmt.Errorf("shoebox/sqlite: replay query: %w", err)
+	}
+	msg.Queue = queue + ".dlq"
+	msg = replayMessage(queue, msg, time.Now().UTC())
+
+	result, err := tx.ExecContext(ctx,
+		`DELETE FROM shoebox_messages WHERE id = ? AND queue = ? AND status = 'dead'`,
+		msgID, queue+".dlq")
+	if err != nil {
+		return fmt.Errorf("shoebox/sqlite: replay delete: %w", err)
+	}
+	if n, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("shoebox/sqlite: replay delete rows: %w", err)
+	} else if n != 1 {
+		return ErrEmpty
+	}
+	if err := enqueueSQLite(ctx, tx, queue, msg); err != nil {
+		return fmt.Errorf("shoebox/sqlite: replay enqueue: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO shoebox_stats (queue, processed, errors, retries, dead)
+		 VALUES (?, 1, 0, 0, 0)
+		 ON CONFLICT(queue) DO UPDATE SET processed = processed + 1`,
+		queue+".dlq"); err != nil {
+		return fmt.Errorf("shoebox/sqlite: replay stats: %w", err)
+	}
 	return tx.Commit()
 }
 

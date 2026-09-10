@@ -11,7 +11,7 @@ import (
 // The collectors are:
 //
 //	shoebox_messages_processed_total{queue}   — counter, bumped on Ack
-//	shoebox_messages_errors_total{queue}      — counter, bumped on Nack
+//	shoebox_messages_errors_total{queue}      — counter, bumped on failed delivery
 //	shoebox_messages_retries_total{queue}     — counter, bumped on retry
 //	shoebox_messages_dead_total{queue}        — counter, bumped on dead-letter
 //	shoebox_queue_depth{queue}                — gauge, set from Stats().Depth
@@ -57,7 +57,7 @@ func NewMetrics(namespace string, registerer prometheus.Registerer) *Metrics {
 		Errors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "messages_errors_total",
-			Help:      "Total messages that returned an error (Nacked).",
+			Help:      "Total messages that returned an error.",
 		}, []string{"queue"}),
 		Retries: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,

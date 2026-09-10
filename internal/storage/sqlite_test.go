@@ -149,24 +149,27 @@ func TestSQLite_AckRemovesMessage(t *testing.T) {
 	}
 }
 
-// TestSQLite_Stats verifies counters move correctly through the lifecycle.
+// TestSQLite_Stats verifies counters move correctly through atomic lifecycle
+// transitions.
 func TestSQLite_Stats(t *testing.T) {
 	s := newTestSQLite(t)
 	ctx := context.Background()
 	mustEnqueueStore(t, s, "q", Message{ID: "ok"})
 	mustEnqueueStore(t, s, "q", Message{ID: "retry"})
+	mustEnqueueStore(t, s, "q", Message{ID: "dead"})
 
-	if _, err := s.Dequeue(ctx, "q", 2); err != nil {
+	msgs, err := s.Dequeue(ctx, "q", 3)
+	if err != nil {
 		t.Fatalf("Dequeue: %v", err)
 	}
 	if err := s.Ack(ctx, "q", "ok"); err != nil {
 		t.Fatalf("Ack: %v", err)
 	}
-	if err := s.Nack(ctx, "q", "retry", errors.New("boom")); err != nil {
-		t.Fatalf("Nack: %v", err)
+	if err := s.Retry(ctx, "q", msgs[1], errors.New("boom")); err != nil {
+		t.Fatalf("Retry: %v", err)
 	}
-	if err := s.Dead(ctx, "q", "retry", errors.New("dead")); err != nil {
-		t.Fatalf("Dead: %v", err)
+	if err := s.DeadLetter(ctx, "q", msgs[2], errors.New("dead")); err != nil {
+		t.Fatalf("DeadLetter: %v", err)
 	}
 
 	stats, err := s.Stats(ctx, "q")
@@ -255,8 +258,8 @@ func TestSQLite_CrashRecovery(t *testing.T) {
 	}
 }
 
-// TestSQLite_DeadLetterFlow verifies that Dead transitions the message to
-// status='dead' and List returns it.
+// TestSQLite_DeadLetterFlow verifies that DeadLetter atomically inserts the
+// DLQ record, marks the source row dead, and records the outcome.
 func TestSQLite_DeadLetterFlow(t *testing.T) {
 	s := newTestSQLite(t)
 	ctx := context.Background()
@@ -267,13 +270,10 @@ func TestSQLite_DeadLetterFlow(t *testing.T) {
 		t.Fatalf("Dequeue: %v", err)
 	}
 
-	// Mark as dead.
-	if err := s.Dead(ctx, "orders", msgs[0].ID, errors.New("handler failed")); err != nil {
-		t.Fatalf("Dead: %v", err)
+	if err := s.DeadLetter(ctx, "orders", msgs[0], errors.New("handler failed")); err != nil {
+		t.Fatalf("DeadLetter: %v", err)
 	}
 
-	// List should return it from the source queue (DLQ view queries
-	// status='dead' on the same table).
 	dead, err := s.List(ctx, "orders", 10)
 	if err != nil {
 		t.Fatalf("List: %v", err)
@@ -286,6 +286,94 @@ func TestSQLite_DeadLetterFlow(t *testing.T) {
 	}
 	if dead[0].Error != "handler failed" {
 		t.Errorf("dead[0].Error = %q, want %q", dead[0].Error, "handler failed")
+	}
+	dlq, err := s.List(ctx, "orders.dlq", 10)
+	if err != nil {
+		t.Fatalf("List DLQ: %v", err)
+	}
+	if len(dlq) != 1 || string(dlq[0].Payload) != "bad" {
+		t.Fatalf("DLQ = %+v, want one payload", dlq)
+	}
+}
+
+func TestSQLite_ReplayMovesDLQMessageAtomically(t *testing.T) {
+	s := newTestSQLite(t)
+	ctx := context.Background()
+	mustEnqueueStore(t, s, "orders", Message{ID: "poison", Payload: []byte("bad")})
+	msgs, err := s.Dequeue(ctx, "orders", 1)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if err := s.DeadLetter(ctx, "orders", msgs[0], errors.New("handler failed")); err != nil {
+		t.Fatalf("DeadLetter: %v", err)
+	}
+
+	dead, err := s.List(ctx, "orders.dlq", 1)
+	if err != nil {
+		t.Fatalf("List DLQ: %v", err)
+	}
+	if err := s.Replay(ctx, "orders", dead[0].ID); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if _, err := s.List(ctx, "orders.dlq", 1); !errors.Is(err, ErrEmpty) {
+		t.Fatalf("DLQ after replay error = %v, want ErrEmpty", err)
+	}
+	replayed, err := s.Dequeue(ctx, "orders", 1)
+	if err != nil {
+		t.Fatalf("Dequeue replayed message: %v", err)
+	}
+	if len(replayed) != 1 || string(replayed[0].Payload) != "bad" {
+		t.Fatalf("replayed = %+v, want one payload", replayed)
+	}
+	if replayed[0].Error != "" || !replayed[0].DeadAt.IsZero() {
+		t.Fatalf("replayed metadata = %+v, want live message metadata", replayed[0])
+	}
+	stats, err := s.Stats(ctx, "orders.dlq")
+	if err != nil {
+		t.Fatalf("DLQ stats: %v", err)
+	}
+	if stats.Processed != 1 {
+		t.Fatalf("DLQ processed = %d, want 1", stats.Processed)
+	}
+}
+
+func TestSQLite_ReplayRollsBackWhenSourceInsertFails(t *testing.T) {
+	s := newTestSQLite(t)
+	ctx := context.Background()
+	mustEnqueueStore(t, s, "orders", Message{ID: "poison", Payload: []byte("bad")})
+	msgs, err := s.Dequeue(ctx, "orders", 1)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if err := s.DeadLetter(ctx, "orders", msgs[0], errors.New("handler failed")); err != nil {
+		t.Fatalf("DeadLetter: %v", err)
+	}
+	dead, err := s.List(ctx, "orders.dlq", 1)
+	if err != nil {
+		t.Fatalf("List DLQ: %v", err)
+	}
+
+	// A trigger makes the source insert fail after the DLQ delete. The
+	// transaction must restore the DLQ row.
+	if _, err := s.db.ExecContext(ctx, `
+		CREATE TRIGGER fail_replay_insert
+		BEFORE INSERT ON shoebox_messages
+		WHEN NEW.queue = 'orders'
+		BEGIN SELECT RAISE(ABORT, 'replay insert blocked'); END;`); err != nil {
+		t.Fatalf("create replay failure trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = s.db.ExecContext(context.Background(), `DROP TRIGGER fail_replay_insert`)
+	})
+	if err := s.Replay(ctx, "orders", dead[0].ID); err == nil {
+		t.Fatal("Replay succeeded despite source insert failure")
+	}
+	remaining, err := s.List(ctx, "orders.dlq", 1)
+	if err != nil {
+		t.Fatalf("List DLQ after failed replay: %v", err)
+	}
+	if len(remaining) != 1 || remaining[0].ID != dead[0].ID {
+		t.Fatalf("DLQ after failed replay = %+v, want original row", remaining)
 	}
 }
 

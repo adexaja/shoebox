@@ -199,18 +199,20 @@ func TestPostgres_Stats(t *testing.T) {
 	ctx := context.Background()
 	mustPgEnqueue(t, s, "q", Message{ID: "ok", Payload: []byte("x")})
 	mustPgEnqueue(t, s, "q", Message{ID: "retry", Payload: []byte("y")})
+	mustPgEnqueue(t, s, "q", Message{ID: "dead", Payload: []byte("z")})
 
-	if _, err := s.Dequeue(ctx, "q", 2); err != nil {
+	msgs, err := s.Dequeue(ctx, "q", 3)
+	if err != nil {
 		t.Fatalf("Dequeue: %v", err)
 	}
 	if err := s.Ack(ctx, "q", "ok"); err != nil {
 		t.Fatalf("Ack: %v", err)
 	}
-	if err := s.Nack(ctx, "q", "retry", errors.New("boom")); err != nil {
-		t.Fatalf("Nack: %v", err)
+	if err := s.Retry(ctx, "q", msgs[1], errors.New("boom")); err != nil {
+		t.Fatalf("Retry: %v", err)
 	}
-	if err := s.Dead(ctx, "q", "retry", errors.New("dead")); err != nil {
-		t.Fatalf("Dead: %v", err)
+	if err := s.DeadLetter(ctx, "q", msgs[2], errors.New("dead")); err != nil {
+		t.Fatalf("DeadLetter: %v", err)
 	}
 
 	stats, err := s.Stats(ctx, "q")
@@ -305,8 +307,8 @@ func TestPostgres_DeadLetterFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dequeue: %v", err)
 	}
-	if err := s.Dead(ctx, "orders", msgs[0].ID, errors.New("handler failed")); err != nil {
-		t.Fatalf("Dead: %v", err)
+	if err := s.DeadLetter(ctx, "orders", msgs[0], errors.New("handler failed")); err != nil {
+		t.Fatalf("DeadLetter: %v", err)
 	}
 
 	dead, err := s.List(ctx, "orders", 10)
@@ -321,6 +323,13 @@ func TestPostgres_DeadLetterFlow(t *testing.T) {
 	}
 	if dead[0].Error != "handler failed" {
 		t.Errorf("dead[0].Error = %q, want %q", dead[0].Error, "handler failed")
+	}
+	dlq, err := s.List(ctx, "orders.dlq", 10)
+	if err != nil {
+		t.Fatalf("List DLQ: %v", err)
+	}
+	if len(dlq) != 1 || string(dlq[0].Payload) != "bad" {
+		t.Fatalf("DLQ = %+v, want one payload", dlq)
 	}
 }
 

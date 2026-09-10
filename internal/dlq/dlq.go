@@ -105,36 +105,8 @@ func (m *Manager) Inspect(ctx context.Context, queue, id string) (Record, error)
 // The original DLQ entry is removed on successful re-enqueue. If the
 // re-enqueue fails the DLQ entry is retained.
 func (m *Manager) Replay(ctx context.Context, queue, id string) error {
-	msgs, err := m.store.List(ctx, dlqQueue(queue), maxListLimit)
-	if err != nil {
+	if err := m.store.Replay(ctx, queue, id); err != nil {
 		return fmt.Errorf("dlq: replay %s/%s: %w", queue, id, err)
-	}
-
-	var found *storage.Message
-	for i := range msgs {
-		if msgs[i].ID == id {
-			found = &msgs[i]
-			break
-		}
-	}
-	if found == nil {
-		return fmt.Errorf("dlq: replay %s/%s: %w", queue, id, storage.ErrEmpty)
-	}
-
-	// Clear DLQ metadata and re-enqueue to the source queue.
-	msg := *found
-	msg.Queue = queue
-	msg.ScheduledAt = time.Now()
-	msg.Error = ""
-	msg.DeadAt = time.Time{}
-
-	if err := m.store.Enqueue(ctx, queue, msg); err != nil {
-		return fmt.Errorf("dlq: replay enqueue %s/%s: %w", queue, id, err)
-	}
-
-	// Remove from DLQ. We Ack the DLQ queue (Ack removes a message by ID).
-	if err := m.store.Ack(ctx, dlqQueue(queue), id); err != nil {
-		return fmt.Errorf("dlq: replay cleanup %s/%s: %w", queue, id, err)
 	}
 	return nil
 }

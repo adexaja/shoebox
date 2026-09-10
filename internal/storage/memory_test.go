@@ -138,25 +138,27 @@ func TestStats_DepthExcludesInFlight(t *testing.T) {
 	}
 }
 
-// TestStats_Counters verifies the cumulative counters move on each lifecycle
-// transition: Processed on Ack, Retries on Nack, Dead on Dead.
+// TestStats_Counters verifies the cumulative counters move correctly through
+// atomic lifecycle transitions.
 func TestStats_Counters(t *testing.T) {
 	m := NewMemory()
 	mustEnqueue(t, m, "q", Message{ID: "ok"})
 	mustEnqueue(t, m, "q", Message{ID: "retry"})
+	mustEnqueue(t, m, "q", Message{ID: "dead"})
 
-	if _, err := m.Dequeue(context.Background(), "q", 2); err != nil {
+	msgs, err := m.Dequeue(context.Background(), "q", 3)
+	if err != nil {
 		t.Fatalf("Dequeue: %v", err)
 	}
 
 	if err := m.Ack(context.Background(), "q", "ok"); err != nil {
 		t.Fatalf("Ack: %v", err)
 	}
-	if err := m.Nack(context.Background(), "q", "retry", errors.New("boom")); err != nil {
-		t.Fatalf("Nack: %v", err)
+	if err := m.Retry(context.Background(), "q", msgs[1], errors.New("boom")); err != nil {
+		t.Fatalf("Retry: %v", err)
 	}
-	if err := m.Dead(context.Background(), "q", "retry", errors.New("dead")); err != nil {
-		t.Fatalf("Dead: %v", err)
+	if err := m.DeadLetter(context.Background(), "q", msgs[2], errors.New("dead")); err != nil {
+		t.Fatalf("DeadLetter: %v", err)
 	}
 
 	s, err := m.Stats(context.Background(), "q")
