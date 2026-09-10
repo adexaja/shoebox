@@ -59,15 +59,24 @@ jobs:
       - name: Compare against baseline
         if: ${{ inputs.refresh_baseline != true }}
         run: |
-          baseline_cpu="$(sed -n 's/^cpu: //p' benchmarks/baseline.txt)"
+          baseline_cpu="$(sed -n 's/^cpu: //p' benchmarks/baseline.txt | head -1)"
           current_cpu="$(sed -n 's/^cpu: //p' current.txt | head -1)"
+          comparable_cpu=true
           if [ -n "$baseline_cpu" ] && [ "$baseline_cpu" != "$current_cpu" ]; then
-            echo "::error::baseline CPU '$baseline_cpu' differs from runner CPU '$current_cpu'; dispatch with refresh_baseline=true and commit the artifact"
-            exit 1
+            comparable_cpu=false
+            echo "::warning::baseline CPU '$baseline_cpu' differs from runner CPU '$current_cpu'; comparison is informational and regression gating is skipped"
+            {
+              echo "### Benchmark comparability"
+              echo "Baseline CPU \`$baseline_cpu\` differs from runner CPU \`$current_cpu\`."
+              echo "The comparison is informational; the regression gate is skipped."
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
           benchstat -format csv benchmarks/baseline.txt current.txt | tee comparison.csv
           benchstat benchmarks/baseline.txt current.txt | tee comparison.txt
           cat comparison.txt >> "$GITHUB_STEP_SUMMARY"
+          if [ "$comparable_cpu" != true ]; then
+            exit 0
+          fi
           awk -F, 'NR > 2 { gsub("%", "", $6); if (($6 + 0) > 10) bad = 1 } END { exit bad }' comparison.csv
       - name: Upload benchmark artifacts
         if: always()

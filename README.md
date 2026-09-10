@@ -12,27 +12,31 @@ Coverage is generated in CI and uploaded to [Codecov](https://codecov.io/gh/adex
 
 ## Benchmark snapshot
 
-The following local medians were measured on 2026-08-24 with Go 1.27 on
+The following local medians were measured on 2026-09-11 with Go 1.27.1 on
 `AMD Ryzen 5 7430U with Radeon Graphics`, using
-`go test ./... -run '^$' -bench ... -benchmem -count=3`. The PostgreSQL
-benchmark used the local PostgreSQL service on the same machine.
+`go test ./... -run '^$' -bench . -benchmem -count=3`. The PostgreSQL
+benchmarks used the local PostgreSQL service on the same machine with
+`user=postgres`, database `shoebox`.
+The checked-in values are a local snapshot, not a hardware-neutral promise.
 
 | Benchmark | ns/op | B/op | allocs/op |
 |-----------|------:|-----:|----------:|
-| Broker memory throughput | 104,559 | 1,618 | 7 |
-| Broker SQLite throughput | 279,590 | 5,795 | 137 |
-| Broker PostgreSQL throughput | 6,037,569 | 3,771 | 64 |
-| PostgreSQL enqueue | 3,005,703 | 587 | 16 |
-| PostgreSQL dequeue | 10,019,215 | 2,723 | 57 |
-| Memory enqueue | 443 | 1,205 | 1 |
-| Memory dequeue steady state | 13,906 | 504 | 6 |
-| Memory dequeue batch | 186,825 | 26,230 | 303 |
-| SQLite enqueue | 54,561 | 1,185 | 24 |
-| SQLite dequeue | 580,025 | 5,061 | 130 |
+| Broker memory throughput | 102,298 | 1,634 | 7 |
+| Broker SQLite throughput | 294,987 | 5,986 | 137 |
+| Broker PostgreSQL throughput | 6,040,244 | 3,764 | 64 |
+| PostgreSQL enqueue | 3,011,097 | 587 | 16 |
+| PostgreSQL dequeue | 10,017,314 | 2,725 | 57 |
+| Memory enqueue | 438.9 | 1,154 | 1 |
+| Memory dequeue steady state | 13,861 | 504 | 6 |
+| Memory dequeue batch | 186,027 | 26,235 | 304 |
+| SQLite enqueue | 55,331 | 1,393 | 25 |
+| SQLite dequeue | 580,616 | 5,271 | 131 |
 
 The scheduled benchmark workflow runs the same PostgreSQL benchmarks against
-its service container and tracks regressions separately from this local
-snapshot.
+its service container and uploads the current and comparison artifacts. Hosted
+runner CPU models can vary; a CPU mismatch produces a warning and skips the
+regression gate rather than failing the workflow. Refresh the baseline only
+after reviewing a run on the intended runner class.
 
 ## Install shoeboxd
 
