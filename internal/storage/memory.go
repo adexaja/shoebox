@@ -12,8 +12,8 @@ import (
 // every queued message is gone.
 //
 // Target scale per the PRD: hundreds to low thousands of messages per
-// minute. The linear-scan Ack and Nack are fine at that size; if Memory
-// ever needs to scale up, switch to an index by ID.
+// minute. The linear-scan Ack, Retry, and Replay are fine at that size; if
+// Memory ever needs to scale up, switch to an index by ID.
 type Memory struct {
 	mu        sync.Mutex
 	queues    map[string][]Message
@@ -58,7 +58,7 @@ func (m *Memory) Enqueue(_ context.Context, queue string, msg Message) error {
 
 // Dequeue returns up to `limit` messages whose ScheduledAt is in the past,
 // in FIFO order. The messages are removed from the pending set; the broker
-// is expected to Ack or Nack them.
+// is expected to Ack, Retry, or DeadLetter them.
 //
 // Implementation note: we hold the lock for the whole scan + pop. That is
 // fine for the target scale; if you push this past thousands of messages
@@ -132,27 +132,50 @@ func (m *Memory) Ack(_ context.Context, queue, msgID string) error {
 	return nil
 }
 
-// Nack records a failed delivery. The broker is responsible for
-// re-enqueueing the message with the updated ScheduledAt and Attempts;
-// we just bump the retry counter.
-func (m *Memory) Nack(_ context.Context, queue, msgID string, _ error) error {
+// Retry records a failed delivery and re-enqueues the updated message as one
+// in-memory transition.
+func (m *Memory) Retry(_ context.Context, queue string, msg Message, _ error) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	msg.Queue = queue
+	m.queues[queue] = append(m.queues[queue], msg)
+	m.dirty[queue] = true
 	s := m.statsFor(queue)
+	s.Errors++
 	s.Retries++
-	if msgID == "" {
-		s.Dead++
-	}
 	return nil
 }
 
-// Dead records that a message has been moved to the {queue}.dlq shadow
-// queue. The broker has already done the move; this is the stat bump.
-func (m *Memory) Dead(_ context.Context, queue, _ string, _ error) error {
+// DeadLetter moves a failed message to its DLQ and records the terminal
+// outcome as one in-memory transition.
+func (m *Memory) DeadLetter(_ context.Context, queue string, msg Message, err error) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	dead := deadLetterMessage(queue, msg, err, time.Now().UTC())
+	m.queues[dead.Queue] = append(m.queues[dead.Queue], dead)
+	m.dirty[dead.Queue] = true
 	m.statsFor(queue).Dead++
 	return nil
+}
+
+// Replay moves a DLQ message back to its source queue as one in-memory
+// transition.
+func (m *Memory) Replay(_ context.Context, queue, msgID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	dlq := queue + ".dlq"
+	pending := m.queues[dlq]
+	for i, msg := range pending {
+		if msg.ID != msgID {
+			continue
+		}
+		m.queues[queue] = append(m.queues[queue], replayMessage(queue, msg, time.Now().UTC()))
+		m.dirty[queue] = true
+		m.statsFor(dlq).Processed++
+		m.queues[dlq] = append(pending[:i], pending[i+1:]...)
+		return nil
+	}
+	return ErrEmpty
 }
 
 // Stats returns a snapshot of the queue's counters and current depth.
@@ -245,16 +268,19 @@ func (m *Memory) DueSchedules(_ context.Context, now time.Time, limit int) ([]Sc
 	return out, nil
 }
 
-func (m *Memory) ClaimSchedule(_ context.Context, id string, now, next time.Time) (bool, error) {
+func (m *Memory) RunSchedule(_ context.Context, schedule Schedule, now, next time.Time) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	s, ok := m.schedules[id]
-	if !ok || !s.Enabled || s.NextRunAt.After(now) {
+	current, ok := m.schedules[schedule.ID]
+	if !ok || !current.Enabled || current.NextRunAt.After(now) ||
+		!current.NextRunAt.Equal(schedule.NextRunAt) {
 		return false, nil
 	}
-	s.NextRunAt = next
-	s.UpdatedAt = time.Now().UTC()
-	m.schedules[id] = s
+	m.queues[schedule.Queue] = append(m.queues[schedule.Queue], periodicMessage(schedule, now))
+	m.dirty[schedule.Queue] = true
+	current.NextRunAt = next
+	current.UpdatedAt = time.Now().UTC()
+	m.schedules[schedule.ID] = current
 	return true, nil
 }
 

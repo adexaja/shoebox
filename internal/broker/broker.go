@@ -460,12 +460,8 @@ func (b *Broker) handleOne(queue string, msg storage.Message) {
 
 	delay := h.opts.Backoff.Next(msg.Attempts)
 	msg.ScheduledAt = time.Now().Add(delay)
-	if err := b.store.Nack(b.storeCtx(), queue, msg.ID, err); err != nil {
-		b.logger.ErrorContext(b.storeCtx(), "shoebox: nack failed",
-			slog.String("queue", queue), slog.String("id", msg.ID), slog.Any("err", err))
-	}
-	if err := b.store.Enqueue(b.storeCtx(), queue, msg); err != nil {
-		b.logger.ErrorContext(b.storeCtx(), "shoebox: re-enqueue failed",
+	if err := b.store.Retry(b.storeCtx(), queue, msg, err); err != nil {
+		b.logger.ErrorContext(b.storeCtx(), "shoebox: retry transition failed",
 			slog.String("queue", queue), slog.String("id", msg.ID), slog.Any("err", err))
 	}
 }
@@ -480,29 +476,12 @@ func (b *Broker) handlerCtx(h *handler) (context.Context, context.CancelFunc) {
 	return context.WithCancel(parent)
 }
 
-// toDeadLetter writes the message to the {queue}.dlq shadow queue and
-// bumps the dead counter. The dead message retains its original payload,
-// the last handler error, the retry count, and a timestamp (E2-S3).
+// toDeadLetter atomically moves a failed message to the {queue}.dlq shadow
+// queue and records the dead counter.
 func (b *Broker) toDeadLetter(queue string, msg storage.Message, handlerErr error) {
-	dlq := queue + ".dlq"
-	sourceID := msg.ID
-	msg.Queue = dlq
-	msg.ScheduledAt = time.Now()
-	msg.DeadAt = time.Now()
-	if handlerErr != nil {
-		msg.Error = handlerErr.Error()
-	}
-	// Persistent backends use a globally unique message ID. Give the DLQ
-	// record its own ID so it can coexist with the source row, which is
-	// marked dead below. Replay will remove this DLQ row before requeueing.
-	msg.ID = storage.NewMessageID()
-	if err := b.store.Enqueue(b.storeCtx(), dlq, msg); err != nil {
-		b.logger.ErrorContext(b.storeCtx(), "shoebox: dlq enqueue failed",
+	if err := b.store.DeadLetter(b.storeCtx(), queue, msg, handlerErr); err != nil {
+		b.logger.ErrorContext(b.storeCtx(), "shoebox: dead-letter transition failed",
 			slog.String("queue", queue), slog.String("id", msg.ID), slog.Any("err", err))
-	}
-	if err := b.store.Dead(b.storeCtx(), queue, sourceID, handlerErr); err != nil {
-		b.logger.ErrorContext(b.storeCtx(), "shoebox: dead-letter stat failed",
-			slog.String("queue", queue), slog.String("id", sourceID), slog.Any("err", err))
 	}
 }
 
@@ -769,11 +748,8 @@ func (b *Broker) scheduleLoop() {
 				for !next.After(now) {
 					next = next.Add(s.Interval)
 				}
-				claimed, err := b.scheduleStore.ClaimSchedule(b.storeCtx(), s.ID, now, next)
-				if err != nil || !claimed {
-					continue
-				}
-				if err := b.Enqueue(b.storeCtx(), s.Queue, s.Payload, EnqueueOpts{}); err != nil {
+				_, err := b.scheduleStore.RunSchedule(b.storeCtx(), s, now, next)
+				if err != nil {
 					b.logger.ErrorContext(b.storeCtx(), "shoebox: periodic enqueue failed",
 						slog.String("id", s.ID), slog.Any("err", err))
 				}

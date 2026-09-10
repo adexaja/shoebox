@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/adexaja/shoebox/migrations"
@@ -274,12 +275,45 @@ func appliedPostgresVersion(ctx context.Context, tx pgx.Tx, latest int) (int, er
 	}
 	return baseline, nil
 }
-
-// Enqueue persists a new message with status 'pending'.
 func (p *Postgres) Enqueue(ctx context.Context, queue string, msg Message) error {
+	return enqueuePostgres(ctx, p.pool.Exec, queue, msg)
+}
+
+func enqueuePostgres(
+	ctx context.Context,
+	exec func(context.Context, string, ...any) (pgconn.CommandTag, error),
+	queue string,
+	msg Message,
+) error {
+	_, err := enqueuePostgresRow(ctx, exec, queue, msg)
+	return err
+}
+
+func enqueuePostgresAtomic(
+	ctx context.Context,
+	exec func(context.Context, string, ...any) (pgconn.CommandTag, error),
+	queue string,
+	msg Message,
+) error {
+	inserted, err := enqueuePostgresRow(ctx, exec, queue, msg)
+	if err != nil {
+		return err
+	}
+	if !inserted {
+		return errors.New("shoebox/postgres: enqueue skipped by conflict")
+	}
+	return nil
+}
+
+func enqueuePostgresRow(
+	ctx context.Context,
+	exec func(context.Context, string, ...any) (pgconn.CommandTag, error),
+	queue string,
+	msg Message,
+) (bool, error) {
 	meta, err := json.Marshal(msg.Metadata)
 	if err != nil {
-		return fmt.Errorf("shoebox/postgres: marshal metadata: %w", err)
+		return false, fmt.Errorf("shoebox/postgres: marshal metadata: %w", err)
 	}
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = time.Now()
@@ -291,7 +325,6 @@ func (p *Postgres) Enqueue(ctx context.Context, queue string, msg Message) error
 	if payload == nil {
 		payload = []byte{}
 	}
-
 	var deadAt any
 	if !msg.DeadAt.IsZero() {
 		deadAt = msg.DeadAt
@@ -301,18 +334,17 @@ func (p *Postgres) Enqueue(ctx context.Context, queue string, msg Message) error
 	if strings.HasSuffix(queue, ".dlq") {
 		status = "dead"
 	}
-	_, err = p.pool.Exec(ctx, `INSERT INTO shoebox_messages
+	tag, err := exec(ctx, `INSERT INTO shoebox_messages
 		(id, queue, payload, attempts, max_retries, created_at, scheduled_at, priority, dedupe_key, metadata, error, dead_at, status)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		ON CONFLICT DO NOTHING`,
 		msg.ID, queue, payload, msg.Attempts, msg.MaxRetries,
-		msg.CreatedAt, msg.ScheduledAt, msg.Priority, msg.DedupeKey, meta, msg.Error, deadAt,
-		status,
+		msg.CreatedAt, msg.ScheduledAt, msg.Priority, msg.DedupeKey, meta, msg.Error, deadAt, status,
 	)
 	if err != nil {
-		return fmt.Errorf("shoebox/postgres: enqueue: %w", err)
+		return false, fmt.Errorf("shoebox/postgres: enqueue: %w", err)
 	}
-	return nil
+	return tag.RowsAffected() == 1, nil
 }
 
 // Dequeue uses SELECT … FOR UPDATE SKIP LOCKED to atomically claim up to
@@ -394,56 +426,112 @@ func (p *Postgres) Ack(ctx context.Context, queue, msgID string) error {
 	return tx.Commit(ctx)
 }
 
-// Nack records a failed delivery. The broker re-enqueues the message with a
-// future ScheduledAt; this method removes the current row and bumps counters.
-func (p *Postgres) Nack(ctx context.Context, queue, msgID string, nakErr error) error {
+// Retry records the failed delivery and persists the updated message for a
+// future delivery in one transaction.
+func (p *Postgres) Retry(ctx context.Context, queue string, msg Message, _ error) error {
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("shoebox/postgres: nack begin: %w", err)
+		return fmt.Errorf("shoebox/postgres: retry begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if _, err := tx.Exec(ctx,
-		`DELETE FROM shoebox_messages WHERE id = $1 AND queue = $2`, msgID, queue); err != nil {
-		return fmt.Errorf("shoebox/postgres: nack delete: %w", err)
+	tag, err := tx.Exec(ctx,
+		`DELETE FROM shoebox_messages WHERE id = $1 AND queue = $2 AND status = 'processing'`, msg.ID, queue)
+	if err != nil {
+		return fmt.Errorf("shoebox/postgres: retry delete: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrEmpty
+	}
+	if err := enqueuePostgresAtomic(ctx, tx.Exec, queue, msg); err != nil {
+		return fmt.Errorf("shoebox/postgres: retry enqueue: %w", err)
 	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO shoebox_stats (queue, processed, errors, retries, dead)
 		 VALUES ($1, 0, 1, 1, 0)
 		 ON CONFLICT(queue) DO UPDATE SET errors = shoebox_stats.errors + 1, retries = shoebox_stats.retries + 1`,
 		queue); err != nil {
-		return fmt.Errorf("shoebox/postgres: nack stats: %w", err)
+		return fmt.Errorf("shoebox/postgres: retry stats: %w", err)
 	}
-
 	return tx.Commit(ctx)
 }
 
-// Dead marks a message as dead (DLQ) and bumps the dead counter.
-func (p *Postgres) Dead(ctx context.Context, queue, msgID string, deadErr error) error {
+// DeadLetter moves a failed message to its DLQ and records the terminal
+// outcome in one transaction.
+func (p *Postgres) DeadLetter(ctx context.Context, queue string, msg Message, handlerErr error) error {
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("shoebox/postgres: dead begin: %w", err)
+		return fmt.Errorf("shoebox/postgres: dead-letter begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	errStr := ""
-	if deadErr != nil {
-		errStr = deadErr.Error()
+	dead := deadLetterMessage(queue, msg, handlerErr, time.Now().UTC())
+	if err := enqueuePostgresAtomic(ctx, tx.Exec, dead.Queue, dead); err != nil {
+		return fmt.Errorf("shoebox/postgres: dead-letter enqueue: %w", err)
 	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE shoebox_messages SET status = 'dead', error = $1, dead_at = now()
-		 WHERE id = $2 AND queue = $3`,
-		errStr, msgID, queue); err != nil {
-		return fmt.Errorf("shoebox/postgres: dead update: %w", err)
+	tag, err := tx.Exec(ctx,
+		`UPDATE shoebox_messages SET status = 'dead', error = $1, dead_at = $2
+		 WHERE id = $3 AND queue = $4 AND status = 'processing'`,
+		dead.Error, dead.DeadAt, msg.ID, queue)
+	if err != nil {
+		return fmt.Errorf("shoebox/postgres: dead-letter update: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrEmpty
 	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO shoebox_stats (queue, processed, errors, retries, dead)
 		 VALUES ($1, 0, 0, 0, 1)
 		 ON CONFLICT(queue) DO UPDATE SET dead = shoebox_stats.dead + 1`,
 		queue); err != nil {
-		return fmt.Errorf("shoebox/postgres: dead stats: %w", err)
+		return fmt.Errorf("shoebox/postgres: dead-letter stats: %w", err)
 	}
+	return tx.Commit(ctx)
+}
 
+// Replay moves a DLQ message back to its source queue in one transaction.
+func (p *Postgres) Replay(ctx context.Context, queue, msgID string) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("shoebox/postgres: replay begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	row := tx.QueryRow(ctx,
+		`SELECT id, payload, attempts, max_retries, created_at, scheduled_at, dedupe_key, metadata, error, dead_at, priority
+		 FROM shoebox_messages
+		 WHERE id = $1 AND queue = $2 AND status = 'dead'
+		 FOR UPDATE`,
+		msgID, queue+".dlq")
+	msg, err := scanPostgresMessage(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrEmpty
+		}
+		return fmt.Errorf("shoebox/postgres: replay query: %w", err)
+	}
+	msg.Queue = queue + ".dlq"
+	msg = replayMessage(queue, msg, time.Now().UTC())
+
+	tag, err := tx.Exec(ctx,
+		`DELETE FROM shoebox_messages WHERE id = $1 AND queue = $2 AND status = 'dead'`,
+		msgID, queue+".dlq")
+	if err != nil {
+		return fmt.Errorf("shoebox/postgres: replay delete: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrEmpty
+	}
+	if err := enqueuePostgresAtomic(ctx, tx.Exec, queue, msg); err != nil {
+		return fmt.Errorf("shoebox/postgres: replay enqueue: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO shoebox_stats (queue, processed, errors, retries, dead)
+		 VALUES ($1, 1, 0, 0, 0)
+		 ON CONFLICT(queue) DO UPDATE SET processed = shoebox_stats.processed + 1`,
+		queue+".dlq"); err != nil {
+		return fmt.Errorf("shoebox/postgres: replay stats: %w", err)
+	}
 	return tx.Commit(ctx)
 }
 
@@ -531,15 +619,15 @@ func (p *Postgres) Close() error {
 	return nil
 }
 
-// scanPostgresMessage scans a pgx.Rows row into a Message. Postgres returns
-// native TIMESTAMPTZ (parsed directly into time.Time) and JSONB (parsed as
-// raw []byte into the metadata map).
-func scanPostgresMessage(rows pgx.Rows) (Message, error) {
+// scanPostgresMessage scans a row into a Message. Postgres returns native
+// TIMESTAMPTZ (parsed directly into time.Time) and JSONB (parsed as raw []byte
+// into the metadata map).
+func scanPostgresMessage(row interface{ Scan(...any) error }) (Message, error) {
 	var m Message
 	var metaBytes []byte
 	var deadAt pgxType
 
-	if err := rows.Scan(
+	if err := row.Scan(
 		&m.ID, &m.Payload, &m.Attempts, &m.MaxRetries,
 		&m.CreatedAt, &m.ScheduledAt, &m.DedupeKey, &metaBytes, &m.Error, &deadAt.val,
 		&m.Priority,
@@ -662,8 +750,27 @@ func (p *Postgres) DueSchedules(ctx context.Context, now time.Time, limit int) (
 	return out, rows.Err()
 }
 
-func (p *Postgres) ClaimSchedule(ctx context.Context, id string, now, next time.Time) (bool, error) {
-	tag, err := p.pool.Exec(ctx, `UPDATE shoebox_schedules SET next_run_at=$1,updated_at=now()
-		WHERE id=$2 AND enabled AND next_run_at <= $3`, next.UTC(), id, now.UTC())
-	return tag.RowsAffected() == 1, err
+func (p *Postgres) RunSchedule(ctx context.Context, schedule Schedule, now, next time.Time) (bool, error) {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("shoebox/postgres: schedule begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx, `UPDATE shoebox_schedules SET next_run_at=$1,updated_at=now()
+		WHERE id=$2 AND enabled AND next_run_at=$3 AND next_run_at <= $4`,
+		next.UTC(), schedule.ID, schedule.NextRunAt.UTC(), now.UTC())
+	if err != nil {
+		return false, fmt.Errorf("shoebox/postgres: schedule update: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return false, nil
+	}
+	if err := enqueuePostgresAtomic(ctx, tx.Exec, schedule.Queue, periodicMessage(schedule, now)); err != nil {
+		return false, fmt.Errorf("shoebox/postgres: schedule enqueue: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("shoebox/postgres: schedule commit: %w", err)
+	}
+	return true, nil
 }

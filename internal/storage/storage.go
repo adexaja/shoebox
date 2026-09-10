@@ -61,13 +61,44 @@ func nonNegativeUint64(v int64) uint64 {
 	return uint64(v)
 }
 
-// ScheduleStore persists periodic enqueue definitions.
+func deadLetterMessage(queue string, msg Message, err error, now time.Time) Message {
+	msg.Queue = queue + ".dlq"
+	msg.ID = NewMessageID()
+	msg.ScheduledAt = now
+	msg.DeadAt = now
+	msg.Error = ""
+	if err != nil {
+		msg.Error = err.Error()
+	}
+	return msg
+}
+
+func replayMessage(queue string, msg Message, now time.Time) Message {
+	msg.Queue = queue
+	msg.ScheduledAt = now
+	msg.Error = ""
+	msg.DeadAt = time.Time{}
+	return msg
+}
+
+func periodicMessage(schedule Schedule, now time.Time) Message {
+	return Message{
+		ID:          NewMessageID(),
+		Queue:       schedule.Queue,
+		Payload:     append([]byte(nil), schedule.Payload...),
+		CreatedAt:   now,
+		ScheduledAt: now,
+	}
+}
+
+// ScheduleStore persists periodic enqueue definitions and executes one
+// occurrence atomically with its cadence advance.
 type ScheduleStore interface {
 	CreateSchedule(ctx context.Context, schedule Schedule) error
 	UpdateSchedule(ctx context.Context, schedule Schedule) error
 	DeleteSchedule(ctx context.Context, id string) error
 	ListSchedules(ctx context.Context, queue string) ([]Schedule, error)
-	ClaimSchedule(ctx context.Context, id string, now, next time.Time) (bool, error)
+	RunSchedule(ctx context.Context, schedule Schedule, now, next time.Time) (bool, error)
 	DueSchedules(ctx context.Context, now time.Time, limit int) ([]Schedule, error)
 }
 
@@ -86,24 +117,28 @@ type QueueStats struct {
 // ErrEmpty is returned by Dequeue when no messages are available.
 var ErrEmpty = errors.New("shoebox/storage: queue empty")
 
-// Storage is the interface every backend implements. It is deliberately
-// small: the broker is the only caller.
+// Storage is the interface every backend implements.
 //
 // Enqueue persists a new message. Dequeue returns up to `limit` messages
 // that are due (ScheduledAt <= now), atomically transitioning them to an
 // in-flight state (SQLite/Postgres: status='processing'; Memory: removed
 // from the pending slice). Ack confirms successful processing and removes
-// the message. Nack records a failed delivery (the broker re-enqueues with
-// a future ScheduledAt for backoff). Dead marks the message as dead and
-// records the last error. List returns dead messages from a queue (DLQ
-// inspection). Reclaim transitions stale in-flight messages back to pending
-// (crash recovery; called once during open of a persistent backend).
+// the message.
+//
+// Retry atomically records a failed delivery and persists the updated
+// message for a future delivery. DeadLetter atomically moves a failed
+// message to its queue's DLQ and records the terminal outcome. Replay
+// atomically moves a DLQ message back to its source queue. List returns
+// dead messages from a queue. Reclaim transitions stale in-flight messages
+// back to pending (crash recovery; called once during open of a persistent
+// backend).
 type Storage interface {
 	Enqueue(ctx context.Context, queue string, m Message) error
 	Dequeue(ctx context.Context, queue string, limit int) ([]Message, error)
 	Ack(ctx context.Context, queue string, msgID string) error
-	Nack(ctx context.Context, queue string, msgID string, err error) error
-	Dead(ctx context.Context, queue string, msgID string, err error) error
+	Retry(ctx context.Context, queue string, m Message, err error) error
+	DeadLetter(ctx context.Context, queue string, m Message, err error) error
+	Replay(ctx context.Context, queue string, msgID string) error
 	Stats(ctx context.Context, queue string) (QueueStats, error)
 	List(ctx context.Context, queue string, limit int) ([]Message, error)
 	Reclaim(ctx context.Context, queue string) error
