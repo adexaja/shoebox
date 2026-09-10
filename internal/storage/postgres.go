@@ -750,8 +750,27 @@ func (p *Postgres) DueSchedules(ctx context.Context, now time.Time, limit int) (
 	return out, rows.Err()
 }
 
-func (p *Postgres) ClaimSchedule(ctx context.Context, id string, now, next time.Time) (bool, error) {
-	tag, err := p.pool.Exec(ctx, `UPDATE shoebox_schedules SET next_run_at=$1,updated_at=now()
-		WHERE id=$2 AND enabled AND next_run_at <= $3`, next.UTC(), id, now.UTC())
-	return tag.RowsAffected() == 1, err
+func (p *Postgres) RunSchedule(ctx context.Context, schedule Schedule, now, next time.Time) (bool, error) {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("shoebox/postgres: schedule begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx, `UPDATE shoebox_schedules SET next_run_at=$1,updated_at=now()
+		WHERE id=$2 AND enabled AND next_run_at=$3 AND next_run_at <= $4`,
+		next.UTC(), schedule.ID, schedule.NextRunAt.UTC(), now.UTC())
+	if err != nil {
+		return false, fmt.Errorf("shoebox/postgres: schedule update: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return false, nil
+	}
+	if err := enqueuePostgresAtomic(ctx, tx.Exec, schedule.Queue, periodicMessage(schedule, now)); err != nil {
+		return false, fmt.Errorf("shoebox/postgres: schedule enqueue: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("shoebox/postgres: schedule commit: %w", err)
+	}
+	return true, nil
 }

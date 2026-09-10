@@ -183,3 +183,66 @@ func ids(msgs []Message) []string {
 	}
 	return out
 }
+func TestRunSchedule_AtomicOccurrence(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	schedule := Schedule{
+		ID: "periodic", Queue: "q", Payload: []byte("payload"),
+		Interval: time.Minute, NextRunAt: now.Add(-time.Minute),
+		Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}
+	m := NewMemory()
+	if err := m.CreateSchedule(ctx, schedule); err != nil {
+		t.Fatalf("CreateSchedule: %v", err)
+	}
+
+	ran, err := m.RunSchedule(ctx, schedule, now, now.Add(time.Minute))
+	if err != nil || !ran {
+		t.Fatalf("RunSchedule = (%t, %v), want (true, nil)", ran, err)
+	}
+	due, err := m.DueSchedules(ctx, now, 10)
+	if err != nil {
+		t.Fatalf("DueSchedules: %v", err)
+	}
+	if len(due) != 0 {
+		t.Fatalf("DueSchedules = %v, want no due schedules", due)
+	}
+	stored, err := m.ListSchedules(ctx, "q")
+	if err != nil {
+		t.Fatalf("ListSchedules: %v", err)
+	}
+	if len(stored) != 1 || !stored[0].NextRunAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("stored schedule = %v, want next run at %v", stored, now.Add(time.Minute))
+	}
+
+	msgs, err := m.List(ctx, "q", 10)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("List returned %d messages, want 1", len(msgs))
+	}
+	if msgs[0].ID == "" || msgs[0].Queue != "q" ||
+		string(msgs[0].Payload) != "payload" ||
+		!msgs[0].CreatedAt.Equal(now) || !msgs[0].ScheduledAt.Equal(now) {
+		t.Fatalf("occurrence = %+v, want fresh immediate message", msgs[0])
+	}
+
+	stale := schedule
+	stale.ID = "stale"
+	if err := m.CreateSchedule(ctx, stale); err != nil {
+		t.Fatalf("CreateSchedule stale: %v", err)
+	}
+	stale.NextRunAt = stale.NextRunAt.Add(-time.Second)
+	ran, err = m.RunSchedule(ctx, stale, now, now.Add(time.Minute))
+	if err != nil || ran {
+		t.Fatalf("stale RunSchedule = (%t, %v), want (false, nil)", ran, err)
+	}
+	due, err = m.DueSchedules(ctx, now, 10)
+	if err != nil {
+		t.Fatalf("DueSchedules after stale claim: %v", err)
+	}
+	if len(due) != 1 || !due[0].NextRunAt.Equal(schedule.NextRunAt) {
+		t.Fatalf("due after stale claim = %v, want original stale cadence", due)
+	}
+}

@@ -268,16 +268,19 @@ func (m *Memory) DueSchedules(_ context.Context, now time.Time, limit int) ([]Sc
 	return out, nil
 }
 
-func (m *Memory) ClaimSchedule(_ context.Context, id string, now, next time.Time) (bool, error) {
+func (m *Memory) RunSchedule(_ context.Context, schedule Schedule, now, next time.Time) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	s, ok := m.schedules[id]
-	if !ok || !s.Enabled || s.NextRunAt.After(now) {
+	current, ok := m.schedules[schedule.ID]
+	if !ok || !current.Enabled || current.NextRunAt.After(now) ||
+		!current.NextRunAt.Equal(schedule.NextRunAt) {
 		return false, nil
 	}
-	s.NextRunAt = next
-	s.UpdatedAt = time.Now().UTC()
-	m.schedules[id] = s
+	m.queues[schedule.Queue] = append(m.queues[schedule.Queue], periodicMessage(schedule, now))
+	m.dirty[schedule.Queue] = true
+	current.NextRunAt = next
+	current.UpdatedAt = time.Now().UTC()
+	m.schedules[schedule.ID] = current
 	return true, nil
 }
 

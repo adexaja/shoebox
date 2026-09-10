@@ -748,11 +748,8 @@ func (b *Broker) scheduleLoop() {
 				for !next.After(now) {
 					next = next.Add(s.Interval)
 				}
-				claimed, err := b.scheduleStore.ClaimSchedule(b.storeCtx(), s.ID, now, next)
-				if err != nil || !claimed {
-					continue
-				}
-				if err := b.Enqueue(b.storeCtx(), s.Queue, s.Payload, EnqueueOpts{}); err != nil {
+				_, err := b.scheduleStore.RunSchedule(b.storeCtx(), s, now, next)
+				if err != nil {
 					b.logger.ErrorContext(b.storeCtx(), "shoebox: periodic enqueue failed",
 						slog.String("id", s.ID), slog.Any("err", err))
 				}

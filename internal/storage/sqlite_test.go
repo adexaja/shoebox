@@ -542,3 +542,72 @@ func TestSQLiteConcurrentFileHandles(t *testing.T) {
 		got += len(msgs)
 	}
 }
+func TestSQLite_RunScheduleAtomic(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	s := newTestSQLite(t)
+	schedule := Schedule{
+		ID: "periodic", Queue: "q", Payload: []byte("payload"),
+		Interval: time.Minute, NextRunAt: now.Add(-time.Minute),
+		Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := s.CreateSchedule(ctx, schedule); err != nil {
+		t.Fatalf("CreateSchedule: %v", err)
+	}
+
+	ran, err := s.RunSchedule(ctx, schedule, now, now.Add(time.Minute))
+	if err != nil || !ran {
+		t.Fatalf("RunSchedule = (%t, %v), want (true, nil)", ran, err)
+	}
+	due, err := s.DueSchedules(ctx, now, 10)
+	if err != nil {
+		t.Fatalf("DueSchedules: %v", err)
+	}
+	if len(due) != 0 {
+		t.Fatalf("DueSchedules = %v, want no due schedules", due)
+	}
+	stored, err := s.ListSchedules(ctx, "q")
+	if err != nil {
+		t.Fatalf("ListSchedules: %v", err)
+	}
+	if len(stored) != 1 || !stored[0].NextRunAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("stored schedule = %v, want next run at %v", stored, now.Add(time.Minute))
+	}
+
+	msgs, err := s.Dequeue(ctx, "q", 10)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if len(msgs) != 1 || string(msgs[0].Payload) != "payload" ||
+		!msgs[0].CreatedAt.Equal(now) || !msgs[0].ScheduledAt.Equal(now) {
+		t.Fatalf("occurrence = %+v, want one immediate payload", msgs)
+	}
+
+	blocked := schedule
+	blocked.ID = "blocked"
+	blocked.Queue = "blocked"
+	if err := s.CreateSchedule(ctx, blocked); err != nil {
+		t.Fatalf("CreateSchedule blocked: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE TRIGGER fail_periodic_insert
+		BEFORE INSERT ON shoebox_messages WHEN NEW.queue = 'blocked'
+		BEGIN SELECT RAISE(ABORT, 'periodic insert blocked'); END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = s.db.ExecContext(context.Background(), `DROP TRIGGER IF EXISTS fail_periodic_insert`)
+	})
+
+	ran, err = s.RunSchedule(ctx, blocked, now, now.Add(time.Minute))
+	if err == nil || ran {
+		t.Fatalf("blocked RunSchedule = (%t, %v), want (false, error)", ran, err)
+	}
+	due, err = s.DueSchedules(ctx, now, 10)
+	if err != nil {
+		t.Fatalf("DueSchedules after failed run: %v", err)
+	}
+	if len(due) != 1 || due[0].ID != blocked.ID ||
+		!due[0].NextRunAt.Equal(blocked.NextRunAt) {
+		t.Fatalf("due after failed run = %v, want blocked schedule at original cadence", due)
+	}
+}

@@ -649,13 +649,30 @@ func (s *SQLite) DueSchedules(ctx context.Context, now time.Time, limit int) ([]
 	return out, rows.Err()
 }
 
-func (s *SQLite) ClaimSchedule(ctx context.Context, id string, now, next time.Time) (bool, error) {
-	res, err := s.db.ExecContext(ctx, `UPDATE shoebox_schedules SET next_run_at=?, updated_at=?
-		WHERE id=? AND enabled=1 AND next_run_at <= ?`,
-		sqliteScheduleTime(next), sqliteScheduleTime(time.Now()), id, sqliteScheduleTime(now))
+func (s *SQLite) RunSchedule(ctx context.Context, schedule Schedule, now, next time.Time) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("shoebox/sqlite: schedule begin: %w", err)
 	}
-	n, err := res.RowsAffected()
-	return n == 1, err
+	defer func() { _ = tx.Rollback() }()
+
+	result, err := tx.ExecContext(ctx, `UPDATE shoebox_schedules SET next_run_at=?, updated_at=?
+		WHERE id=? AND enabled=1 AND next_run_at=? AND next_run_at <= ?`,
+		sqliteScheduleTime(next), sqliteScheduleTime(time.Now().UTC()), schedule.ID,
+		sqliteScheduleTime(schedule.NextRunAt), sqliteScheduleTime(now))
+	if err != nil {
+		return false, fmt.Errorf("shoebox/sqlite: schedule update: %w", err)
+	}
+	if n, err := result.RowsAffected(); err != nil {
+		return false, fmt.Errorf("shoebox/sqlite: schedule update rows: %w", err)
+	} else if n != 1 {
+		return false, nil
+	}
+	if err := enqueueSQLite(ctx, tx, schedule.Queue, periodicMessage(schedule, now)); err != nil {
+		return false, fmt.Errorf("shoebox/sqlite: schedule enqueue: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("shoebox/sqlite: schedule commit: %w", err)
+	}
+	return true, nil
 }

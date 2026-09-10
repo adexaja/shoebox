@@ -81,13 +81,24 @@ func replayMessage(queue string, msg Message, now time.Time) Message {
 	return msg
 }
 
-// ScheduleStore persists periodic enqueue definitions.
+func periodicMessage(schedule Schedule, now time.Time) Message {
+	return Message{
+		ID:          NewMessageID(),
+		Queue:       schedule.Queue,
+		Payload:     append([]byte(nil), schedule.Payload...),
+		CreatedAt:   now,
+		ScheduledAt: now,
+	}
+}
+
+// ScheduleStore persists periodic enqueue definitions and executes one
+// occurrence atomically with its cadence advance.
 type ScheduleStore interface {
 	CreateSchedule(ctx context.Context, schedule Schedule) error
 	UpdateSchedule(ctx context.Context, schedule Schedule) error
 	DeleteSchedule(ctx context.Context, id string) error
 	ListSchedules(ctx context.Context, queue string) ([]Schedule, error)
-	ClaimSchedule(ctx context.Context, id string, now, next time.Time) (bool, error)
+	RunSchedule(ctx context.Context, schedule Schedule, now, next time.Time) (bool, error)
 	DueSchedules(ctx context.Context, now time.Time, limit int) ([]Schedule, error)
 }
 

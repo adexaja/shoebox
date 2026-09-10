@@ -200,9 +200,9 @@ mgr.Replay(ctx, "orders", id)
 ### Periodic jobs
 
 Persistent backends store periodic schedules and recover them after restart.
-Each due cadence is enqueued through the normal `Enqueue` path. Missed
-occurrences advance to the first future cadence instead of replaying an
-unbounded backlog.
+Each due cadence is inserted as an immediate message in the same atomic storage
+operation that advances the schedule. Missed occurrences advance to the first
+future cadence instead of replaying an unbounded backlog.
 
 ```go
 q.RegisterPeriodic(shoebox.PeriodicJob{
@@ -215,9 +215,10 @@ q.RegisterPeriodic(shoebox.PeriodicJob{
 defer q.RemovePeriodic("hourly-report")
 ```
 
-Schedules are claimed atomically by SQLite and PostgreSQL, so multiple queue
-instances do not enqueue the same occurrence. `Pause` leaves a schedule
-persisted; its cadence continues and missed runs follow the same rule.
+Schedules run atomically in every backend. SQLite and PostgreSQL transactions
+prevent multiple queue instances from enqueueing the same occurrence. `Pause`
+leaves a schedule persisted; its cadence continues and missed runs follow the
+same rule.
 
 ### Delayed and scheduled messages
 
