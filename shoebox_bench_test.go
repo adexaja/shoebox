@@ -4,17 +4,22 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// benchmarkDSN is the local development Postgres connection string. The broker
-// Postgres throughput benchmark skips if Postgres is unreachable, so the
-// default `go test ./...` (which only runs benchmarks under -bench) stays
-// green on machines without Postgres.
-const benchmarkDSN = "host=localhost port=5432 dbname=shoebox user=postgres password=123 sslmode=disable"
+// benchmarkDSN is the Postgres connection string used by the broker
+// benchmarks. CI and local runs can provide credentials through
+// SHOEBOX_TEST_POSTGRES_DSN; the fallback relies on passwordless local auth.
+var benchmarkDSN = func() string {
+	if dsn := os.Getenv("SHOEBOX_TEST_POSTGRES_DSN"); dsn != "" {
+		return dsn
+	}
+	return "host=localhost port=5432 dbname=shoebox user=postgres sslmode=disable"
+}()
 
 // benchQueue builds a Queue with the given storage kind and a discarding
 // logger, with cleanup draining on exit.
