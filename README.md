@@ -128,6 +128,41 @@ func main() {
 }
 ```
 
+## Batching
+
+`EnqueueBatch` stores multiple messages in one storage operation. SQLite and
+PostgreSQL commit the batch transactionally; Memory stores it in-process. Each
+item can provide its own enqueue options:
+
+```go
+err := q.EnqueueBatch("orders", []shoebox.EnqueueBatchItem{
+    {Payload: []byte(`{"order_id": 123}`)},
+    {
+        Payload: []byte(`{"order_id": 124}`),
+        Options: []shoebox.EnqueueOpt{shoebox.WithPriority(shoebox.High)},
+})
+```
+
+Acknowledgement batching is opt-in and reduces acknowledgement transaction
+overhead for high-throughput consumers:
+
+```go
+q, err := shoebox.New(shoebox.Options{
+    Storage: shoebox.Postgres,
+    DSN:     "host=localhost port=5432 dbname=shoebox user=postgres sslmode=disable",
+    Batching: shoebox.BatchOptions{
+        Enabled:          true,
+        AckBatchSize:     50,
+        AckFlushInterval: 10 * time.Millisecond,
+    },
+})
+```
+
+The defaults are 50 acknowledgements and 10ms when batching is enabled.
+Pending acknowledgements remain in memory until flushed, so a crash can cause
+redelivery but cannot lose an unacknowledged message. `Drain` and `Shutdown`
+flush pending acknowledgements before completing.
+
 ## Storage
 
 | Backend | Configuration | Survives restart | Notes |
