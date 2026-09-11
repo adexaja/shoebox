@@ -231,6 +231,48 @@ func TestAckBatchFlushesOnDrainAndShutdown(t *testing.T) {
 	})
 }
 
+func TestAckBatchConcurrentHandlers(t *testing.T) {
+	store := storage.NewMemory()
+	b := New(Options{
+		Storage:          store,
+		Concurrency:      8,
+		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		AckBatchSize:     10,
+		AckFlushInterval: time.Hour,
+	})
+	defer func() { _ = b.Shutdown(context.Background()) }()
+
+	const count = 100
+	processed := make(chan struct{}, count)
+	b.Register("q", func(context.Context, storage.Message) error {
+		processed <- struct{}{}
+		return nil
+	}, HandlerOptions{})
+	items := make([]EnqueueBatchItem, count)
+	if err := b.EnqueueBatch(context.Background(), "q", items); err != nil {
+		t.Fatalf("EnqueueBatch: %v", err)
+	}
+
+	deadline := time.After(time.Second)
+	for range count {
+		select {
+		case <-processed:
+		case <-deadline:
+			t.Fatal("timed out waiting for handlers")
+		}
+	}
+	if err := b.Drain(context.Background(), "q"); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	stats, err := store.Stats(context.Background(), "q")
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats.Processed != count {
+		t.Fatalf("Processed = %d, want %d", stats.Processed, count)
+	}
+}
+
 func waitForAckBatch(t *testing.T, ch <-chan struct{}) {
 	t.Helper()
 	select {

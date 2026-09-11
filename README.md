@@ -38,6 +38,24 @@ runner CPU models can vary; a CPU mismatch produces a warning and skips the
 regression gate rather than failing the workflow. Refresh the baseline only
 after reviewing a run on the intended runner class.
 
+### Batched operations
+
+These batch results were measured on the same machine with
+`-benchtime=10x` for storage and `-benchtime=100x` for broker throughput.
+Values are nanoseconds per message:
+
+| Operation | 1 | 10 | 50 | 100 |
+|-----------|--:|---:|---:|----:|
+| SQLite `EnqueueBatch` | 61,808 | 12,372 | 8,636 | 8,440 |
+| SQLite `AckBatch` | 273,706 | 29,699 | 8,852 | 6,264 |
+| PostgreSQL `EnqueueBatch` | 3,313,669 | 379,945 | 84,394 | 52,306 |
+| PostgreSQL `AckBatch` | 5,925,065 | 626,599 | 122,698 | 60,256 |
+| Broker SQLite batched | 334,372 | 76,694 | 66,615 | 59,242 |
+| Broker PostgreSQL batched | 6,064,655 | 838,810 | 870,358 | 724,486 |
+
+The concurrent acknowledgement batching race test passes under
+`go test -race ./...`.
+
 ## Install shoeboxd
 
 Install the standalone server command with:
