@@ -138,6 +138,51 @@ func TestStats_DepthExcludesInFlight(t *testing.T) {
 	}
 }
 
+func TestMemory_AckIgnoresPendingMessage(t *testing.T) {
+	m := NewMemory()
+	mustEnqueue(t, m, "q", Message{ID: "x"})
+
+	if err := m.Ack(context.Background(), "q", "x"); err != nil {
+		t.Fatalf("Ack pending: %v", err)
+	}
+	s, err := m.Stats(context.Background(), "q")
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if s.Processed != 0 {
+		t.Fatalf("Processed = %d, want 0", s.Processed)
+	}
+	got, err := m.Dequeue(context.Background(), "q", 1)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "x" {
+		t.Fatalf("after pending ack, got %v, want [x]", ids(got))
+	}
+}
+
+func TestMemory_AckAfterDequeueCountsOnce(t *testing.T) {
+	m := NewMemory()
+	mustEnqueue(t, m, "q", Message{ID: "x"})
+
+	if _, err := m.Dequeue(context.Background(), "q", 1); err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if err := m.Ack(context.Background(), "q", "x"); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	if err := m.Ack(context.Background(), "q", "x"); err != nil {
+		t.Fatalf("Ack twice: %v", err)
+	}
+	s, err := m.Stats(context.Background(), "q")
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if s.Processed != 1 {
+		t.Fatalf("Processed = %d, want 1", s.Processed)
+	}
+}
+
 // TestStats_Counters verifies the cumulative counters move correctly through
 // atomic lifecycle transitions.
 func TestStats_Counters(t *testing.T) {

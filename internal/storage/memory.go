@@ -12,12 +12,13 @@ import (
 // every queued message is gone.
 //
 // Target scale per the PRD: hundreds to low thousands of messages per
-// minute. The linear-scan Ack, Retry, and Replay are fine at that size; if
-// Memory ever needs to scale up, switch to an index by ID.
+// minute. Replay still scans its small DLQ slice; if Memory ever needs more
+// scale, switch to indexes by queue and ID.
 type Memory struct {
 	mu        sync.Mutex
 	queues    map[string][]Message
 	counters  map[string]*QueueStats
+	inflight  map[string]map[string]struct{}
 	dirty     map[string]bool
 	schedules map[string]Schedule
 }
@@ -27,6 +28,7 @@ func NewMemory() *Memory {
 	return &Memory{
 		queues:    make(map[string][]Message),
 		counters:  make(map[string]*QueueStats),
+		inflight:  make(map[string]map[string]struct{}),
 		dirty:     make(map[string]bool),
 		schedules: make(map[string]Schedule),
 	}
@@ -108,27 +110,24 @@ func (m *Memory) Dequeue(_ context.Context, queue string, limit int) ([]Message,
 	if len(out) == 0 {
 		return nil, ErrEmpty
 	}
+	if m.inflight[queue] == nil {
+		m.inflight[queue] = make(map[string]struct{}, len(out))
+	}
+	for _, msg := range out {
+		m.inflight[queue][msg.ID] = struct{}{}
+	}
 	return out, nil
 }
 
-// Ack removes a message from the in-flight set. In Memory there is no
-// separate in-flight set; the message is already gone from the queue
-// after Dequeue. Ack is therefore a counter increment.
+// Ack removes a message from the in-flight set.
 func (m *Memory) Ack(_ context.Context, queue, msgID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.statsFor(queue).Processed++
-	// Remove the message from the queue if it is still in the pending slice.
-	// For normally dispatched messages this is a no-op (Dequeue already
-	// removed it), but for DLQ entries (enqueued but never dequeued) Ack
-	// is how Replay removes them from the shadow queue.
-	pending := m.queues[queue]
-	for i, msg := range pending {
-		if msg.ID == msgID {
-			m.queues[queue] = append(pending[:i], pending[i+1:]...)
-			break
-		}
+	if _, ok := m.inflight[queue][msgID]; !ok {
+		return nil
 	}
+	delete(m.inflight[queue], msgID)
+	m.statsFor(queue).Processed++
 	return nil
 }
 
@@ -137,6 +136,7 @@ func (m *Memory) Ack(_ context.Context, queue, msgID string) error {
 func (m *Memory) Retry(_ context.Context, queue string, msg Message, _ error) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	delete(m.inflight[queue], msg.ID)
 	msg.Queue = queue
 	m.queues[queue] = append(m.queues[queue], msg)
 	m.dirty[queue] = true
@@ -151,6 +151,7 @@ func (m *Memory) Retry(_ context.Context, queue string, msg Message, _ error) er
 func (m *Memory) DeadLetter(_ context.Context, queue string, msg Message, err error) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	delete(m.inflight[queue], msg.ID)
 	dead := deadLetterMessage(queue, msg, err, time.Now().UTC())
 	m.queues[dead.Queue] = append(m.queues[dead.Queue], dead)
 	m.dirty[dead.Queue] = true

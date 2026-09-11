@@ -295,9 +295,17 @@ func (s *SQLite) Ack(ctx context.Context, queue, msgID string) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM shoebox_messages WHERE id = ? AND queue = ?`, msgID, queue); err != nil {
+	result, err := tx.ExecContext(ctx,
+		`DELETE FROM shoebox_messages WHERE id = ? AND queue = ? AND status = 'processing'`, msgID, queue)
+	if err != nil {
 		return fmt.Errorf("shoebox/sqlite: ack delete: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("shoebox/sqlite: ack delete rows: %w", err)
+	}
+	if rows == 0 {
+		return tx.Commit()
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO shoebox_stats (queue, processed, errors, retries, dead)

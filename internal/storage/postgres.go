@@ -411,9 +411,13 @@ func (p *Postgres) Ack(ctx context.Context, queue, msgID string) error {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if _, err := tx.Exec(ctx,
-		`DELETE FROM shoebox_messages WHERE id = $1 AND queue = $2`, msgID, queue); err != nil {
+	tag, err := tx.Exec(ctx,
+		`DELETE FROM shoebox_messages WHERE id = $1 AND queue = $2 AND status = 'processing'`, msgID, queue)
+	if err != nil {
 		return fmt.Errorf("shoebox/postgres: ack delete: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return tx.Commit(ctx)
 	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO shoebox_stats (queue, processed, errors, retries, dead)

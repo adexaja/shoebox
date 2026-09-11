@@ -194,6 +194,30 @@ func TestPostgres_AckRemovesMessage(t *testing.T) {
 	}
 }
 
+func TestPostgres_AckIgnoresPendingMessage(t *testing.T) {
+	s := newTestPostgres(t)
+	ctx := context.Background()
+	mustPgEnqueue(t, s, "q", Message{ID: "x", Payload: []byte("x")})
+
+	if err := s.Ack(ctx, "q", "x"); err != nil {
+		t.Fatalf("Ack pending: %v", err)
+	}
+	stats, err := s.Stats(ctx, "q")
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats.Processed != 0 {
+		t.Fatalf("Processed = %d, want 0", stats.Processed)
+	}
+	got, err := s.Dequeue(ctx, "q", 1)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "x" {
+		t.Fatalf("after pending ack, got %v, want [x]", ids(got))
+	}
+}
+
 func TestPostgres_Stats(t *testing.T) {
 	s := newTestPostgres(t)
 	ctx := context.Background()
