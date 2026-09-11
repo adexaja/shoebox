@@ -143,10 +143,17 @@ func benchmarkBrokerBatched(b *testing.B, kind StorageKind) {
 				processed.Add(1)
 				return nil
 			})
+
+			totalMessages := b.N * size
 			b.ResetTimer()
-			enqueueBatchAndWait(b, q, &processed, b.N, size)
+			enqueueBatchAndWait(b, q, &processed, totalMessages, size)
+			if err := q.Drain(context.Background(), "q"); err != nil {
+				b.Fatal(err)
+			}
+			elapsed := b.Elapsed()
 			b.StopTimer()
-			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N), "ns/message")
+			b.ReportMetric(float64(elapsed.Nanoseconds())/float64(totalMessages), "ns/message")
+			b.ReportMetric(float64(totalMessages)*float64(time.Second)/float64(elapsed), "msg/s")
 		})
 	}
 }
@@ -176,29 +183,25 @@ func enqueueAndWait(b *testing.B, q *Queue, processed *atomic.Int64, n int) {
 	}
 }
 
-func enqueueBatchAndWait(b *testing.B, q *Queue, processed *atomic.Int64, n, batchSize int) {
+func enqueueBatchAndWait(b *testing.B, q *Queue, processed *atomic.Int64, totalMessages, batchSize int) {
 	b.Helper()
 	deadline := time.Now().Add(30 * time.Second)
-	for sent := 0; sent < n; {
-		size := batchSize
-		if remaining := n - sent; remaining < size {
-			size = remaining
-		}
-		items := make([]EnqueueBatchItem, size)
+	for sent := 0; sent < totalMessages; {
+		items := make([]EnqueueBatchItem, batchSize)
 		for i := range items {
 			items[i].Payload = []byte("shoebox benchmark payload")
 		}
 		if err := q.EnqueueBatch("q", items); err != nil {
 			b.Fatal(err)
 		}
-		sent += size
+		sent += batchSize
 		if sent%1000 == 0 && time.Now().After(deadline) {
-			b.Fatalf("timed out at message %d/%d (processed %d)", sent, n, processed.Load())
+			b.Fatalf("timed out at message %d/%d (processed %d)", sent, totalMessages, processed.Load())
 		}
 	}
-	for processed.Load() < int64(n) {
+	for processed.Load() < int64(totalMessages) {
 		if time.Now().After(deadline) {
-			b.Fatalf("drain timed out: processed %d of %d", processed.Load(), n)
+			b.Fatalf("drain timed out: processed %d of %d", processed.Load(), totalMessages)
 		}
 		time.Sleep(time.Millisecond)
 	}
