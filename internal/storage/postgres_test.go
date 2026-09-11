@@ -216,8 +216,9 @@ func TestPostgres_DequeueVisibleAtFiltering(t *testing.T) {
 	ctx := context.Background()
 
 	mustPgEnqueue(t, s, "q", Message{ID: "due", ScheduledAt: time.Now().Add(-time.Second)})
-	mustPgEnqueue(t, s, "q", Message{ID: "later", ScheduledAt: time.Now().Add(80 * time.Millisecond)})
 	mustPgEnqueue(t, s, "q", Message{ID: "due2", ScheduledAt: time.Now().Add(-time.Second)})
+	laterAt := time.Now().Add(500 * time.Millisecond)
+	mustPgEnqueue(t, s, "q", Message{ID: "later", ScheduledAt: laterAt})
 
 	got, err := s.Dequeue(ctx, "q", 5)
 	if err != nil {
@@ -231,7 +232,7 @@ func TestPostgres_DequeueVisibleAtFiltering(t *testing.T) {
 		t.Fatalf("before due: err = %v, want ErrEmpty", err)
 	}
 
-	time.Sleep(120 * time.Millisecond)
+	time.Sleep(time.Until(laterAt) + 20*time.Millisecond)
 	got, err = s.Dequeue(ctx, "q", 5)
 	if err != nil {
 		t.Fatalf("Dequeue after delay: %v", err)
