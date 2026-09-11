@@ -48,6 +48,38 @@ func TestDequeue_FIFOOrder(t *testing.T) {
 	}
 }
 
+func TestMemory_EnqueueBatch(t *testing.T) {
+	m := NewMemory()
+	if err := m.EnqueueBatch(context.Background(), "q", []Message{
+		{ID: "a", Payload: []byte("a")},
+		{ID: "b", Payload: []byte("b")},
+		{ID: "c", Payload: []byte("c")},
+	}); err != nil {
+		t.Fatalf("EnqueueBatch: %v", err)
+	}
+
+	got, err := m.Dequeue(context.Background(), "q", 10)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if len(got) != 3 || got[0].ID != "a" || got[1].ID != "b" || got[2].ID != "c" {
+		t.Fatalf("got %v, want [a b c]", ids(got))
+	}
+	if !got[0].CreatedAt.Before(got[1].CreatedAt) || !got[1].CreatedAt.Before(got[2].CreatedAt) {
+		t.Fatalf("CreatedAt order = %v, want strict batch order", []time.Time{got[0].CreatedAt, got[1].CreatedAt, got[2].CreatedAt})
+	}
+}
+
+func TestMemory_EnqueueBatchEmpty(t *testing.T) {
+	m := NewMemory()
+	if err := m.EnqueueBatch(context.Background(), "q", nil); err != nil {
+		t.Fatalf("EnqueueBatch empty: %v", err)
+	}
+	if got, err := m.Dequeue(context.Background(), "q", 1); !errors.Is(err, ErrEmpty) {
+		t.Fatalf("Dequeue after empty batch = %v, %v; want ErrEmpty", ids(got), err)
+	}
+}
+
 // TestDequeue_VisibleAtFiltering verifies a message with a future ScheduledAt
 // is not returned until that time elapses, and that it is not lost in the
 // meantime (the kept-slice compaction must preserve it).
@@ -180,6 +212,29 @@ func TestMemory_AckAfterDequeueCountsOnce(t *testing.T) {
 	}
 	if s.Processed != 1 {
 		t.Fatalf("Processed = %d, want 1", s.Processed)
+	}
+}
+
+func TestMemory_AckBatchCountsOnlyInFlight(t *testing.T) {
+	m := NewMemory()
+	for _, id := range []string{"a", "b", "c"} {
+		mustEnqueue(t, m, "q", Message{ID: id})
+	}
+	if _, err := m.Dequeue(context.Background(), "q", 3); err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if err := m.AckBatch(context.Background(), "q", []string{"a", "c", "missing"}); err != nil {
+		t.Fatalf("AckBatch: %v", err)
+	}
+	if err := m.AckBatch(context.Background(), "q", nil); err != nil {
+		t.Fatalf("AckBatch empty: %v", err)
+	}
+	s, err := m.Stats(context.Background(), "q")
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if s.Processed != 2 {
+		t.Fatalf("Processed = %d, want 2", s.Processed)
 	}
 }
 

@@ -192,6 +192,38 @@ func (s *SQLite) Enqueue(ctx context.Context, queue string, msg Message) error {
 	return enqueueSQLite(ctx, s.db, queue, msg)
 }
 
+func (s *SQLite) EnqueueBatch(ctx context.Context, queue string, messages []Message) error {
+	if len(messages) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("shoebox/sqlite: enqueue batch begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := time.Now()
+	for i, msg := range messages {
+		assignedCreatedAt := msg.CreatedAt.IsZero()
+		if assignedCreatedAt {
+			msg.CreatedAt = now.Add(time.Duration(i) * time.Microsecond)
+		}
+		if msg.ScheduledAt.IsZero() {
+			if assignedCreatedAt {
+				msg.ScheduledAt = now
+			} else {
+				msg.ScheduledAt = msg.CreatedAt
+			}
+		}
+		if err := enqueueSQLite(ctx, tx, queue, msg); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("shoebox/sqlite: enqueue batch commit: %w", err)
+	}
+	return nil
+}
+
 type sqliteExecer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
@@ -313,6 +345,47 @@ func (s *SQLite) Ack(ctx context.Context, queue, msgID string) error {
 		 ON CONFLICT(queue) DO UPDATE SET processed = processed + 1`,
 		queue); err != nil {
 		return fmt.Errorf("shoebox/sqlite: ack stats: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+func (s *SQLite) AckBatch(ctx context.Context, queue string, msgIDs []string) error {
+	if len(msgIDs) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("shoebox/sqlite: ack batch begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	stmt, err := tx.PrepareContext(ctx, `DELETE FROM shoebox_messages WHERE id = ? AND queue = ? AND status = 'processing'`)
+	if err != nil {
+		return fmt.Errorf("shoebox/sqlite: ack batch prepare: %w", err)
+	}
+	defer func() { _ = stmt.Close() }()
+
+	var processed int64
+	for _, msgID := range msgIDs {
+		result, err := stmt.ExecContext(ctx, msgID, queue)
+		if err != nil {
+			return fmt.Errorf("shoebox/sqlite: ack batch delete: %w", err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("shoebox/sqlite: ack batch delete rows: %w", err)
+		}
+		processed += rows
+	}
+	if processed > 0 {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO shoebox_stats (queue, processed, errors, retries, dead)
+			 VALUES (?, ?, 0, 0, 0)
+			 ON CONFLICT(queue) DO UPDATE SET processed = processed + excluded.processed`,
+			queue, processed); err != nil {
+			return fmt.Errorf("shoebox/sqlite: ack batch stats: %w", err)
+		}
 	}
 
 	return tx.Commit()

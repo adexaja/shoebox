@@ -197,47 +197,52 @@ func (b *Broker) storeCtx() context.Context {
 // including during Shutdown — the broker is designed to drain in-flight
 // work before stopping.
 func (b *Broker) Enqueue(ctx context.Context, queue string, payload []byte, opts EnqueueOpts) error {
-	// Durable Postgres dedupe is enforced by the storage unique index.
-	if !b.durableDedupe && opts.DedupeKey != "" && b.dedupe.SeenOrAdd(queue+":"+opts.DedupeKey, b.dedupeTTL) {
-		if b.dedupeMetrics != nil {
-			b.dedupeMetrics.DedupeHit(queue)
-			b.dedupeMetrics.DedupeEntries(b.dedupe.Len())
-		}
+	now := time.Now()
+	msg, dedupeKey, ok := b.enqueueMessage(queue, payload, opts, now, now, false)
+	if !ok {
 		return nil
 	}
-	if !b.durableDedupe && opts.DedupeKey != "" && b.dedupeMetrics != nil {
-		b.dedupeMetrics.DedupeMiss(queue)
-		b.dedupeMetrics.DedupeEntries(b.dedupe.Len())
-	}
-	if b.durableDedupe && opts.DedupeKey != "" && b.dedupeMetrics != nil {
-		b.dedupeMetrics.DedupeMiss(queue)
-	}
-
-	now := time.Now()
-	scheduled := now
-	switch {
-	case !opts.Schedule.IsZero():
-		scheduled = opts.Schedule
-	case opts.Delay > 0:
-		scheduled = now.Add(opts.Delay)
-	}
-
-	msg := storage.Message{
-		ID:          storage.NewMessageID(),
-		Queue:       queue,
-		Payload:     payload,
-		Attempts:    0,
-		MaxRetries:  0, // filled in by dispatcher; not used at enqueue time
-		CreatedAt:   now,
-		ScheduledAt: scheduled,
-		Priority:    opts.Priority,
-		DedupeKey:   opts.DedupeKey,
-		Metadata:    opts.Metadata,
-	}
 	if err := b.store.Enqueue(ctx, queue, msg); err != nil {
+		b.rollbackDedupe([]string{dedupeKey})
 		return err
 	}
 
+	b.wake(queue)
+	return nil
+}
+
+// EnqueueBatch adds messages to the queue in one storage operation and pokes
+// the dispatcher once. The call returns after the batch is stored.
+func (b *Broker) EnqueueBatch(ctx context.Context, queue string, items []EnqueueBatchItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+	now := time.Now()
+	messages := make([]storage.Message, 0, len(items))
+	dedupeKeys := make([]string, 0, len(items))
+	for _, item := range items {
+		createdAt := now.Add(time.Duration(len(messages)) * time.Microsecond)
+		msg, dedupeKey, ok := b.enqueueMessage(queue, item.Payload, item.Opts, createdAt, now, true)
+		if ok {
+			messages = append(messages, msg)
+		}
+		if dedupeKey != "" {
+			dedupeKeys = append(dedupeKeys, dedupeKey)
+		}
+	}
+	if len(messages) == 0 {
+		return nil
+	}
+	if err := b.store.EnqueueBatch(ctx, queue, messages); err != nil {
+		b.rollbackDedupe(dedupeKeys)
+		return err
+	}
+
+	b.wake(queue)
+	return nil
+}
+
+func (b *Broker) wake(queue string) {
 	b.hMu.RLock()
 	wake, ok := b.dispatchC[queue]
 	b.hMu.RUnlock()
@@ -247,7 +252,66 @@ func (b *Broker) Enqueue(ctx context.Context, queue string, payload []byte, opts
 		default:
 		}
 	}
-	return nil
+}
+
+func (b *Broker) rollbackDedupe(keys []string) {
+	for _, key := range keys {
+		if key != "" {
+			b.dedupe.Delete(key)
+		}
+	}
+	if len(keys) > 0 && b.dedupeMetrics != nil {
+		b.dedupeMetrics.DedupeEntries(b.dedupe.Len())
+	}
+}
+
+func (b *Broker) enqueueMessage(queue string, payload []byte, opts EnqueueOpts, createdAt, scheduledAt time.Time, copyMetadata bool) (storage.Message, string, bool) {
+	var addedDedupeKey string
+	// Durable Postgres dedupe is enforced by the storage unique index.
+	if !b.durableDedupe && opts.DedupeKey != "" {
+		addedDedupeKey = queue + ":" + opts.DedupeKey
+		if b.dedupe.SeenOrAdd(addedDedupeKey, b.dedupeTTL) {
+			if b.dedupeMetrics != nil {
+				b.dedupeMetrics.DedupeHit(queue)
+				b.dedupeMetrics.DedupeEntries(b.dedupe.Len())
+			}
+			return storage.Message{}, "", false
+		}
+	}
+	if !b.durableDedupe && opts.DedupeKey != "" && b.dedupeMetrics != nil {
+		b.dedupeMetrics.DedupeMiss(queue)
+		b.dedupeMetrics.DedupeEntries(b.dedupe.Len())
+	}
+	if b.durableDedupe && opts.DedupeKey != "" && b.dedupeMetrics != nil {
+		b.dedupeMetrics.DedupeMiss(queue)
+	}
+
+	switch {
+	case !opts.Schedule.IsZero():
+		scheduledAt = opts.Schedule
+	case opts.Delay > 0:
+		scheduledAt = scheduledAt.Add(opts.Delay)
+	}
+
+	metadata := opts.Metadata
+	if copyMetadata && len(metadata) > 0 {
+		metadata = make(map[string]string, len(opts.Metadata))
+		for k, v := range opts.Metadata {
+			metadata[k] = v
+		}
+	}
+	return storage.Message{
+		ID:          storage.NewMessageID(),
+		Queue:       queue,
+		Payload:     payload,
+		Attempts:    0,
+		MaxRetries:  0, // filled in by dispatcher; not used at enqueue time
+		CreatedAt:   createdAt,
+		ScheduledAt: scheduledAt,
+		Priority:    opts.Priority,
+		DedupeKey:   opts.DedupeKey,
+		Metadata:    metadata,
+	}, addedDedupeKey, true
 }
 
 // EnqueueOpts is the broker's view of the public EnqueueOptions.
@@ -257,6 +321,11 @@ type EnqueueOpts struct {
 	Priority  int
 	DedupeKey string
 	Metadata  map[string]string
+}
+
+type EnqueueBatchItem struct {
+	Payload []byte
+	Opts    EnqueueOpts
 }
 
 // dispatch is the per-queue worker loop. It runs `concurrency` handlers

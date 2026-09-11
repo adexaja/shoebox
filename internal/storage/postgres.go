@@ -279,6 +279,55 @@ func (p *Postgres) Enqueue(ctx context.Context, queue string, msg Message) error
 	return enqueuePostgres(ctx, p.pool.Exec, queue, msg)
 }
 
+func (p *Postgres) EnqueueBatch(ctx context.Context, queue string, messages []Message) error {
+	if len(messages) == 0 {
+		return nil
+	}
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("shoebox/postgres: enqueue batch begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	now := time.Now()
+	batch := &pgx.Batch{}
+	for i, msg := range messages {
+		assignedCreatedAt := msg.CreatedAt.IsZero()
+		if assignedCreatedAt {
+			msg.CreatedAt = now.Add(time.Duration(i) * time.Microsecond)
+		}
+		if msg.ScheduledAt.IsZero() {
+			if assignedCreatedAt {
+				msg.ScheduledAt = now
+			} else {
+				msg.ScheduledAt = msg.CreatedAt
+			}
+		}
+		args, err := postgresEnqueueArgs(queue, msg)
+		if err != nil {
+			return err
+		}
+		batch.Queue(`INSERT INTO shoebox_messages
+		(id, queue, payload, attempts, max_retries, created_at, scheduled_at, priority, dedupe_key, metadata, error, dead_at, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		ON CONFLICT DO NOTHING`, args...)
+	}
+	results := tx.SendBatch(ctx, batch)
+	for range messages {
+		if _, err := results.Exec(); err != nil {
+			_ = results.Close()
+			return fmt.Errorf("shoebox/postgres: enqueue batch: %w", err)
+		}
+	}
+	if err := results.Close(); err != nil {
+		return fmt.Errorf("shoebox/postgres: enqueue batch close: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("shoebox/postgres: enqueue batch commit: %w", err)
+	}
+	return nil
+}
+
 func enqueuePostgres(
 	ctx context.Context,
 	exec func(context.Context, string, ...any) (pgconn.CommandTag, error),
@@ -311,9 +360,24 @@ func enqueuePostgresRow(
 	queue string,
 	msg Message,
 ) (bool, error) {
+	args, err := postgresEnqueueArgs(queue, msg)
+	if err != nil {
+		return false, err
+	}
+	tag, err := exec(ctx, `INSERT INTO shoebox_messages
+		(id, queue, payload, attempts, max_retries, created_at, scheduled_at, priority, dedupe_key, metadata, error, dead_at, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		ON CONFLICT DO NOTHING`, args...)
+	if err != nil {
+		return false, fmt.Errorf("shoebox/postgres: enqueue: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func postgresEnqueueArgs(queue string, msg Message) ([]any, error) {
 	meta, err := json.Marshal(msg.Metadata)
 	if err != nil {
-		return false, fmt.Errorf("shoebox/postgres: marshal metadata: %w", err)
+		return nil, fmt.Errorf("shoebox/postgres: marshal metadata: %w", err)
 	}
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = time.Now()
@@ -329,22 +393,14 @@ func enqueuePostgresRow(
 	if !msg.DeadAt.IsZero() {
 		deadAt = msg.DeadAt
 	}
-
 	status := "pending"
 	if strings.HasSuffix(queue, ".dlq") {
 		status = "dead"
 	}
-	tag, err := exec(ctx, `INSERT INTO shoebox_messages
-		(id, queue, payload, attempts, max_retries, created_at, scheduled_at, priority, dedupe_key, metadata, error, dead_at, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-		ON CONFLICT DO NOTHING`,
+	return []any{
 		msg.ID, queue, payload, msg.Attempts, msg.MaxRetries,
 		msg.CreatedAt, msg.ScheduledAt, msg.Priority, msg.DedupeKey, meta, msg.Error, deadAt, status,
-	)
-	if err != nil {
-		return false, fmt.Errorf("shoebox/postgres: enqueue: %w", err)
-	}
-	return tag.RowsAffected() == 1, nil
+	}, nil
 }
 
 // Dequeue uses SELECT … FOR UPDATE SKIP LOCKED to atomically claim up to
@@ -425,6 +481,36 @@ func (p *Postgres) Ack(ctx context.Context, queue, msgID string) error {
 		 ON CONFLICT(queue) DO UPDATE SET processed = shoebox_stats.processed + 1`,
 		queue); err != nil {
 		return fmt.Errorf("shoebox/postgres: ack stats: %w", err)
+	}
+
+	return tx.Commit(ctx)
+}
+
+func (p *Postgres) AckBatch(ctx context.Context, queue string, msgIDs []string) error {
+	if len(msgIDs) == 0 {
+		return nil
+	}
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("shoebox/postgres: ack batch begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx,
+		`DELETE FROM shoebox_messages WHERE queue = $1 AND status = 'processing' AND id = ANY($2)`,
+		queue, msgIDs)
+	if err != nil {
+		return fmt.Errorf("shoebox/postgres: ack batch delete: %w", err)
+	}
+	processed := tag.RowsAffected()
+	if processed > 0 {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO shoebox_stats (queue, processed, errors, retries, dead)
+			 VALUES ($1, $2, 0, 0, 0)
+			 ON CONFLICT(queue) DO UPDATE SET processed = shoebox_stats.processed + excluded.processed`,
+			queue, processed); err != nil {
+			return fmt.Errorf("shoebox/postgres: ack batch stats: %w", err)
+		}
 	}
 
 	return tx.Commit(ctx)

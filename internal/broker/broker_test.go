@@ -43,6 +43,77 @@ func (c *closeCounter) Close() error {
 	return nil
 }
 
+type enqueueCountingStore struct {
+	storage.Storage
+	enqueues  int
+	batches   int
+	failBatch bool
+}
+
+func (s *enqueueCountingStore) Enqueue(ctx context.Context, queue string, msg storage.Message) error {
+	s.enqueues++
+	return s.Storage.Enqueue(ctx, queue, msg)
+}
+
+func (s *enqueueCountingStore) EnqueueBatch(ctx context.Context, queue string, messages []storage.Message) error {
+	s.batches++
+	if s.failBatch {
+		return errors.New("batch failed")
+	}
+	return s.Storage.EnqueueBatch(ctx, queue, messages)
+}
+
+func TestEnqueueUsesSingleStoragePath(t *testing.T) {
+	store := &enqueueCountingStore{Storage: storage.NewMemory()}
+	b := quietBroker(t, store, 1)
+
+	if err := b.Enqueue(context.Background(), "q", []byte("x"), EnqueueOpts{}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if store.enqueues != 1 || store.batches != 0 {
+		t.Fatalf("calls: Enqueue=%d EnqueueBatch=%d, want 1/0", store.enqueues, store.batches)
+	}
+}
+
+func TestEnqueueBatchUsesBatchStoragePath(t *testing.T) {
+	store := &enqueueCountingStore{Storage: storage.NewMemory()}
+	b := quietBroker(t, store, 1)
+
+	if err := b.EnqueueBatch(context.Background(), "q", []EnqueueBatchItem{
+		{Payload: []byte("a")},
+		{Payload: []byte("b")},
+	}); err != nil {
+		t.Fatalf("EnqueueBatch: %v", err)
+	}
+	if store.enqueues != 0 || store.batches != 1 {
+		t.Fatalf("calls: Enqueue=%d EnqueueBatch=%d, want 0/1", store.enqueues, store.batches)
+	}
+}
+
+func TestEnqueueBatchRollsBackDedupeOnStoreFailure(t *testing.T) {
+	mem := storage.NewMemory()
+	store := &enqueueCountingStore{Storage: mem, failBatch: true}
+	b := quietBroker(t, store, 1)
+
+	err := b.EnqueueBatch(context.Background(), "q", []EnqueueBatchItem{
+		{Payload: []byte("failed"), Opts: EnqueueOpts{DedupeKey: "k"}},
+	})
+	if err == nil {
+		t.Fatal("EnqueueBatch succeeded despite storage failure")
+	}
+	store.failBatch = false
+	if err := b.Enqueue(context.Background(), "q", []byte("retry"), EnqueueOpts{DedupeKey: "k"}); err != nil {
+		t.Fatalf("Enqueue retry: %v", err)
+	}
+	msgs, err := mem.Dequeue(context.Background(), "q", 1)
+	if err != nil {
+		t.Fatalf("Dequeue retry: %v", err)
+	}
+	if len(msgs) != 1 || string(msgs[0].Payload) != "retry" {
+		t.Fatalf("dequeued = %v, want retry", msgs)
+	}
+}
+
 // TestShutdown_DrainFollowupDuringDrain is the regression test for E1-CONC-1
 // and E1-CONC-4. It forces the exact race the audit described: a handler,
 // while Shutdown is draining, enqueues a follow-up message *after* the

@@ -56,6 +56,59 @@ func TestSQLite_EnqueueDequeue(t *testing.T) {
 	}
 }
 
+func TestSQLite_EnqueueBatch(t *testing.T) {
+	s := newTestSQLite(t)
+	ctx := context.Background()
+
+	if err := s.EnqueueBatch(ctx, "q", []Message{
+		{ID: "a", Payload: []byte("a")},
+		{ID: "b", Payload: []byte("b")},
+		{ID: "c", Payload: []byte("c")},
+	}); err != nil {
+		t.Fatalf("EnqueueBatch: %v", err)
+	}
+
+	got, err := s.Dequeue(ctx, "q", 10)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if len(got) != 3 || got[0].ID != "a" || got[1].ID != "b" || got[2].ID != "c" {
+		t.Fatalf("got %v, want [a b c]", ids(got))
+	}
+	if !got[0].CreatedAt.Before(got[1].CreatedAt) || !got[1].CreatedAt.Before(got[2].CreatedAt) {
+		t.Fatalf("CreatedAt order = %v, want strict batch order", []time.Time{got[0].CreatedAt, got[1].CreatedAt, got[2].CreatedAt})
+	}
+}
+
+func TestSQLite_EnqueueBatchEmpty(t *testing.T) {
+	s := newTestSQLite(t)
+	ctx := context.Background()
+	if err := s.EnqueueBatch(ctx, "q", nil); err != nil {
+		t.Fatalf("EnqueueBatch empty: %v", err)
+	}
+	if got, err := s.Dequeue(ctx, "q", 1); !errors.Is(err, ErrEmpty) {
+		t.Fatalf("Dequeue after empty batch = %v, %v; want ErrEmpty", ids(got), err)
+	}
+}
+
+func TestSQLite_EnqueueBatchRollsBackOnError(t *testing.T) {
+	s := newTestSQLite(t)
+	ctx := context.Background()
+	mustEnqueueStore(t, s, "q", Message{ID: "dupe"})
+
+	err := s.EnqueueBatch(ctx, "q", []Message{{ID: "a"}, {ID: "dupe"}, {ID: "c"}})
+	if err == nil {
+		t.Fatal("EnqueueBatch succeeded with duplicate ID")
+	}
+	got, err := s.Dequeue(ctx, "q", 10)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "dupe" {
+		t.Fatalf("after failed batch, got %v, want only [dupe]", ids(got))
+	}
+}
+
 // TestSQLite_DequeueFIFOOrder verifies messages come out in the same order
 // they went in, across multiple dequeue batches.
 func TestSQLite_DequeueFIFOOrder(t *testing.T) {
@@ -170,6 +223,40 @@ func TestSQLite_AckIgnoresPendingMessage(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].ID != "x" {
 		t.Fatalf("after pending ack, got %v, want [x]", ids(got))
+	}
+}
+
+func TestSQLite_AckBatchCountsOnlyProcessing(t *testing.T) {
+	s := newTestSQLite(t)
+	ctx := context.Background()
+	for _, id := range []string{"a", "b", "c", "pending"} {
+		mustEnqueueStore(t, s, "q", Message{ID: id})
+	}
+	if _, err := s.Dequeue(ctx, "q", 3); err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if err := s.AckBatch(ctx, "q", []string{"a", "c", "pending", "missing"}); err != nil {
+		t.Fatalf("AckBatch: %v", err)
+	}
+	if err := s.AckBatch(ctx, "q", nil); err != nil {
+		t.Fatalf("AckBatch empty: %v", err)
+	}
+	stats, err := s.Stats(ctx, "q")
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats.Processed != 2 {
+		t.Fatalf("Processed = %d, want 2", stats.Processed)
+	}
+	if err := s.Reclaim(ctx, "q"); err != nil {
+		t.Fatalf("Reclaim: %v", err)
+	}
+	got, err := s.Dequeue(ctx, "q", 10)
+	if err != nil {
+		t.Fatalf("Dequeue remaining: %v", err)
+	}
+	if len(got) != 2 || got[0].ID != "b" || got[1].ID != "pending" {
+		t.Fatalf("remaining = %v, want [b pending]", ids(got))
 	}
 }
 

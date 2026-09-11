@@ -110,6 +110,12 @@ type EnqueueOptions struct {
 	Metadata map[string]string
 }
 
+// EnqueueBatchItem is one message for Queue.EnqueueBatch.
+type EnqueueBatchItem struct {
+	Payload []byte
+	Options []EnqueueOpt
+}
+
 // Priority is a delivery-ordering hint within a single queue.
 type Priority int
 
