@@ -143,7 +143,7 @@ func TestAckBatchFlushesOnSize(t *testing.T) {
 		AckBatchSize:     2,
 		AckFlushInterval: time.Hour,
 	})
-	defer b.Shutdown(context.Background())
+	defer func() { _ = b.Shutdown(context.Background()) }()
 	b.Register("q", func(context.Context, storage.Message) error { return nil }, HandlerOptions{})
 
 	for _, payload := range []string{"a", "b"} {
@@ -169,7 +169,7 @@ func TestAckBatchFlushesOnInterval(t *testing.T) {
 		AckBatchSize:     100,
 		AckFlushInterval: 5 * time.Millisecond,
 	})
-	defer b.Shutdown(context.Background())
+	defer func() { _ = b.Shutdown(context.Background()) }()
 	b.Register("q", func(context.Context, storage.Message) error { return nil }, HandlerOptions{})
 
 	if err := b.Enqueue(context.Background(), "q", []byte("a"), EnqueueOpts{}); err != nil {

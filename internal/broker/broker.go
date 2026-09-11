@@ -582,7 +582,10 @@ func (b *Broker) ackLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			b.flushAllAcks()
+			if err := b.flushAllAcks(); err != nil {
+				b.logger.ErrorContext(b.storeCtx(), "shoebox: ack batch flush failed",
+					slog.Any("err", err))
+			}
 		case <-b.ackStop:
 			return
 		}

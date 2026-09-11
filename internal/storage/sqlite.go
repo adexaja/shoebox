@@ -207,7 +207,7 @@ func (s *SQLite) EnqueueBatch(ctx context.Context, queue string, messages []Mess
 	if err != nil {
 		return fmt.Errorf("shoebox/sqlite: enqueue batch prepare: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	now := time.Now()
 	for i, msg := range messages {
