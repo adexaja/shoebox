@@ -279,6 +279,7 @@ func (p *Postgres) Enqueue(ctx context.Context, queue string, msg Message) error
 	return enqueuePostgres(ctx, p.pool.Exec, queue, msg)
 }
 
+// EnqueueBatch inserts all messages in one PostgreSQL transaction.
 func (p *Postgres) EnqueueBatch(ctx context.Context, queue string, messages []Message) error {
 	if len(messages) == 0 {
 		return nil
@@ -307,10 +308,7 @@ func (p *Postgres) EnqueueBatch(ctx context.Context, queue string, messages []Me
 		if err != nil {
 			return err
 		}
-		batch.Queue(`INSERT INTO shoebox_messages
-		(id, queue, payload, attempts, max_retries, created_at, scheduled_at, priority, dedupe_key, metadata, error, dead_at, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-		ON CONFLICT DO NOTHING`, args...)
+		batch.Queue(postgresInsertSQL(msg), args...)
 	}
 	results := tx.SendBatch(ctx, batch)
 	for range messages {
@@ -354,6 +352,21 @@ func enqueuePostgresAtomic(
 	return nil
 }
 
+const postgresInsertStatement = `INSERT INTO shoebox_messages
+	(id, queue, payload, attempts, max_retries, created_at, scheduled_at, priority, dedupe_key, metadata, error, dead_at, status)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`
+
+const postgresDedupeInsertStatement = postgresInsertStatement + `
+	ON CONFLICT (queue, dedupe_key)
+	WHERE dedupe_key <> '' AND status IN ('pending', 'processing') DO NOTHING`
+
+func postgresInsertSQL(msg Message) string {
+	if msg.DedupeKey != "" {
+		return postgresDedupeInsertStatement
+	}
+	return postgresInsertStatement
+}
+
 func enqueuePostgresRow(
 	ctx context.Context,
 	exec func(context.Context, string, ...any) (pgconn.CommandTag, error),
@@ -364,10 +377,7 @@ func enqueuePostgresRow(
 	if err != nil {
 		return false, err
 	}
-	tag, err := exec(ctx, `INSERT INTO shoebox_messages
-		(id, queue, payload, attempts, max_retries, created_at, scheduled_at, priority, dedupe_key, metadata, error, dead_at, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-		ON CONFLICT DO NOTHING`, args...)
+	tag, err := exec(ctx, postgresInsertSQL(msg), args...)
 	if err != nil {
 		return false, fmt.Errorf("shoebox/postgres: enqueue: %w", err)
 	}
@@ -486,6 +496,7 @@ func (p *Postgres) Ack(ctx context.Context, queue, msgID string) error {
 	return tx.Commit(ctx)
 }
 
+// AckBatch deletes processing messages and updates processed atomically.
 func (p *Postgres) AckBatch(ctx context.Context, queue string, msgIDs []string) error {
 	if len(msgIDs) == 0 {
 		return nil

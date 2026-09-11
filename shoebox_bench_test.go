@@ -2,6 +2,7 @@ package shoebox
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -24,11 +25,23 @@ var benchmarkDSN = func() string {
 // benchQueue builds a Queue with the given storage kind and a discarding
 // logger, with cleanup draining on exit.
 func benchQueue(tb testing.TB, kind StorageKind, b *testing.B) *Queue {
+	return benchQueueOptions(tb, kind, b, 0)
+}
+
+func benchQueueOptions(tb testing.TB, kind StorageKind, b *testing.B, ackBatchSize int) *Queue {
+	tb.Helper()
 	b.Helper()
 	opts := Options{
 		Storage:     kind,
 		Concurrency: 8,
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	if ackBatchSize > 0 {
+		opts.Batching = BatchOptions{
+			Enabled:          true,
+			AckBatchSize:     ackBatchSize,
+			AckFlushInterval: 10 * time.Millisecond,
+		}
 	}
 	switch kind {
 	case SQLite:
@@ -109,6 +122,35 @@ func BenchmarkBrokerThroughput_Postgres(b *testing.B) {
 	b.SetBytes(int64(len("shoebox benchmark payload")))
 }
 
+// BenchmarkBrokerThroughput_SQLite_Batched measures transactional enqueue and
+// broker acknowledgement batching at the requested batch sizes.
+func BenchmarkBrokerThroughput_SQLite_Batched(b *testing.B) {
+	benchmarkBrokerBatched(b, SQLite)
+}
+
+// BenchmarkBrokerThroughput_Postgres_Batched measures transactional enqueue
+// and broker acknowledgement batching at the requested batch sizes.
+func BenchmarkBrokerThroughput_Postgres_Batched(b *testing.B) {
+	benchmarkBrokerBatched(b, Postgres)
+}
+
+func benchmarkBrokerBatched(b *testing.B, kind StorageKind) {
+	for _, size := range []int{1, 10, 50, 100} {
+		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
+			q := benchQueueOptions(b, kind, b, size)
+			var processed atomic.Int64
+			q.Handle("q", func(_ context.Context, _ Message) error {
+				processed.Add(1)
+				return nil
+			})
+			b.ResetTimer()
+			enqueueBatchAndWait(b, q, &processed, b.N, size)
+			b.StopTimer()
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N), "ns/message")
+		})
+	}
+}
+
 // enqueueAndWait enqueues n messages and blocks until all n have been
 // processed (or the loop's deadline hits — the benchmark would then be
 // measuring failure).
@@ -127,6 +169,34 @@ func enqueueAndWait(b *testing.B, q *Queue, processed *atomic.Int64, n int) {
 		if processed.Load() >= int64(n) {
 			return
 		}
+		if time.Now().After(deadline) {
+			b.Fatalf("drain timed out: processed %d of %d", processed.Load(), n)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func enqueueBatchAndWait(b *testing.B, q *Queue, processed *atomic.Int64, n, batchSize int) {
+	b.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for sent := 0; sent < n; {
+		size := batchSize
+		if remaining := n - sent; remaining < size {
+			size = remaining
+		}
+		items := make([]EnqueueBatchItem, size)
+		for i := range items {
+			items[i].Payload = []byte("shoebox benchmark payload")
+		}
+		if err := q.EnqueueBatch("q", items); err != nil {
+			b.Fatal(err)
+		}
+		sent += size
+		if sent%1000 == 0 && time.Now().After(deadline) {
+			b.Fatalf("timed out at message %d/%d (processed %d)", sent, n, processed.Load())
+		}
+	}
+	for processed.Load() < int64(n) {
 		if time.Now().After(deadline) {
 			b.Fatalf("drain timed out: processed %d of %d", processed.Load(), n)
 		}

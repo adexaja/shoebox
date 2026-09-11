@@ -47,9 +47,22 @@ type Options struct {
 	// in the same process or to isolate metrics in tests.
 	MetricsRegistry *prometheus.Registry
 
-	// Dedupe selects the in-memory deduplication policy. An empty policy uses
-	// the backward-compatible unbounded TTL store.
+	// Dedupe controls in-memory or durable deduplication.
 	Dedupe DedupeOptions
+
+	// Batching enables broker acknowledgement batching. EnqueueBatch always
+	// uses transactional storage batching explicitly.
+	Batching BatchOptions
+}
+
+// BatchOptions configures optional broker acknowledgement batching.
+type BatchOptions struct {
+	// Enabled enables buffered broker acknowledgements.
+	Enabled bool
+	// AckBatchSize flushes buffered acknowledgements at this count.
+	AckBatchSize int
+	// AckFlushInterval flushes pending acknowledgements after this duration.
+	AckFlushInterval time.Duration
 }
 
 // DedupePolicy selects how in-memory deduplication state is retained.

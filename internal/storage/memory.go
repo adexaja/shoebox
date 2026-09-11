@@ -157,6 +157,7 @@ func (m *Memory) Ack(_ context.Context, queue, msgID string) error {
 	return nil
 }
 
+// AckBatch removes processing messages and increments processed for rows removed.
 func (m *Memory) AckBatch(_ context.Context, queue string, msgIDs []string) error {
 	if len(msgIDs) == 0 {
 		return nil

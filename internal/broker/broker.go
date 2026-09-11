@@ -15,13 +15,16 @@ import (
 	"github.com/adexaja/shoebox/internal/storage"
 )
 
+// Options configures the internal broker and optional acknowledgement batching.
 type Options struct {
-	Storage       storage.Storage
-	Concurrency   int
-	Logger        *slog.Logger
-	Dedupe        DedupeOptions
-	DedupeMetrics DedupeMetrics
-	DurableDedupe bool
+	Storage          storage.Storage
+	Concurrency      int
+	Logger           *slog.Logger
+	Dedupe           DedupeOptions
+	DedupeMetrics    DedupeMetrics
+	DurableDedupe    bool
+	AckBatchSize     int
+	AckFlushInterval time.Duration
 }
 
 // DedupeMetrics receives optional deduplication instrumentation from the
@@ -59,6 +62,14 @@ type Broker struct {
 	abortOnce sync.Once
 	abortCh   chan struct{}
 	wg        sync.WaitGroup // counts dispatchers + workers; Shutdown waits on this
+
+	ackMu            sync.Mutex
+	pendingAcks      map[string][]string
+	ackBatchSize     int
+	ackFlushInterval time.Duration
+	ackStop          chan struct{}
+	ackStopOnce      sync.Once
+	ackWG            sync.WaitGroup
 
 	closeOnce sync.Once
 	closed    atomic.Bool
@@ -110,23 +121,31 @@ func New(opts Options) *Broker {
 		dedupe = newTTLDedupeStore()
 	}
 	b := &Broker{
-		store:         opts.Storage,
-		concurrency:   opts.Concurrency,
-		logger:        opts.Logger,
-		handlers:      make(map[string]*handler),
-		dispatchC:     make(map[string]chan struct{}),
-		dispatching:   make(map[string]bool),
-		inflight:      make(map[string]*atomic.Int64),
-		stopCh:        make(chan struct{}),
-		abortCh:       make(chan struct{}),
-		shutdownCtx:   context.Background(),
-		dedupe:        dedupe,
-		dedupeMetrics: opts.DedupeMetrics,
-		dedupeTTL:     DefaultDedupeTTL,
-		durableDedupe: opts.DurableDedupe,
-		paused:        make(map[string]*atomic.Bool),
-		qDraining:     make(map[string]*atomic.Bool),
-		drainDone:     make(map[string]chan struct{}),
+		store:            opts.Storage,
+		concurrency:      opts.Concurrency,
+		logger:           opts.Logger,
+		handlers:         make(map[string]*handler),
+		dispatchC:        make(map[string]chan struct{}),
+		dispatching:      make(map[string]bool),
+		inflight:         make(map[string]*atomic.Int64),
+		stopCh:           make(chan struct{}),
+		abortCh:          make(chan struct{}),
+		shutdownCtx:      context.Background(),
+		dedupe:           dedupe,
+		dedupeMetrics:    opts.DedupeMetrics,
+		dedupeTTL:        DefaultDedupeTTL,
+		durableDedupe:    opts.DurableDedupe,
+		paused:           make(map[string]*atomic.Bool),
+		qDraining:        make(map[string]*atomic.Bool),
+		drainDone:        make(map[string]chan struct{}),
+		ackBatchSize:     opts.AckBatchSize,
+		ackFlushInterval: opts.AckFlushInterval,
+	}
+	if b.ackBatchSize > 0 && b.ackFlushInterval > 0 {
+		b.pendingAcks = make(map[string][]string)
+		b.ackStop = make(chan struct{})
+		b.ackWG.Add(1)
+		go b.ackLoop()
 	}
 	if schedules, ok := opts.Storage.(storage.ScheduleStore); ok {
 		b.scheduleStore = schedules
@@ -323,6 +342,7 @@ type EnqueueOpts struct {
 	Metadata  map[string]string
 }
 
+// EnqueueBatchItem carries one broker message and its resolved options.
 type EnqueueBatchItem struct {
 	Payload []byte
 	Opts    EnqueueOpts
@@ -433,6 +453,11 @@ func (b *Broker) drainComplete(queue string) bool {
 	if !b.quiescent(queue) {
 		return false
 	}
+	if err := b.flushAcks(queue); err != nil {
+		b.logger.ErrorContext(b.storeCtx(), "shoebox: drain ack flush failed",
+			slog.String("queue", queue), slog.Any("err", err))
+		return false
+	}
 
 	stats, err := b.store.Stats(b.storeCtx(), queue)
 	if err != nil {
@@ -508,7 +533,7 @@ func (b *Broker) handleOne(queue string, msg storage.Message) {
 	defer cancel()
 	err := h.chain(ctx, msg)
 	if err == nil {
-		if err := b.store.Ack(b.storeCtx(), queue, msg.ID); err != nil {
+		if err := b.ack(queue, msg.ID); err != nil {
 			b.logger.ErrorContext(b.storeCtx(), "shoebox: ack failed",
 				slog.String("queue", queue), slog.String("id", msg.ID), slog.Any("err", err))
 		}
@@ -533,6 +558,79 @@ func (b *Broker) handleOne(queue string, msg storage.Message) {
 		b.logger.ErrorContext(b.storeCtx(), "shoebox: retry transition failed",
 			slog.String("queue", queue), slog.String("id", msg.ID), slog.Any("err", err))
 	}
+}
+
+func (b *Broker) ack(queue, msgID string) error {
+	if b.ackBatchSize <= 0 || b.ackStop == nil {
+		return b.store.Ack(b.storeCtx(), queue, msgID)
+	}
+
+	b.ackMu.Lock()
+	b.pendingAcks[queue] = append(b.pendingAcks[queue], msgID)
+	flush := len(b.pendingAcks[queue]) >= b.ackBatchSize
+	b.ackMu.Unlock()
+	if flush {
+		return b.flushAcks(queue)
+	}
+	return nil
+}
+
+func (b *Broker) ackLoop() {
+	defer b.ackWG.Done()
+	ticker := time.NewTicker(b.ackFlushInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			b.flushAllAcks()
+		case <-b.ackStop:
+			return
+		}
+	}
+}
+
+func (b *Broker) flushAcks(queue string) error {
+	b.ackMu.Lock()
+	ids := b.pendingAcks[queue]
+	delete(b.pendingAcks, queue)
+	b.ackMu.Unlock()
+	if len(ids) == 0 {
+		return nil
+	}
+
+	if err := b.store.AckBatch(b.storeCtx(), queue, ids); err != nil {
+		b.ackMu.Lock()
+		b.pendingAcks[queue] = append(ids, b.pendingAcks[queue]...)
+		b.ackMu.Unlock()
+		return err
+	}
+	return nil
+}
+
+func (b *Broker) flushAllAcks() error {
+	b.ackMu.Lock()
+	queues := make([]string, 0, len(b.pendingAcks))
+	for queue := range b.pendingAcks {
+		queues = append(queues, queue)
+	}
+	b.ackMu.Unlock()
+
+	var firstErr error
+	for _, queue := range queues {
+		if err := b.flushAcks(queue); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func (b *Broker) stopAckLoop() {
+	b.ackStopOnce.Do(func() {
+		if b.ackStop != nil {
+			close(b.ackStop)
+		}
+	})
+	b.ackWG.Wait()
 }
 
 // handlerCtx builds the context handed to a handler: a cancellation that
@@ -595,8 +693,10 @@ func (b *Broker) Shutdown(ctx context.Context) error {
 	go func() { b.wg.Wait(); close(done) }()
 	select {
 	case <-done:
+		b.stopAckLoop()
+		err := b.flushAllAcks()
 		b.closeOnce.Do(func() { _ = b.store.Close() })
-		return nil
+		return err
 	case <-ctx.Done():
 		// Force-abort: dispatchers exit immediately; workers finish on their
 		// own (wg covers them). We MUST still wait for wg so we don't close
@@ -607,6 +707,8 @@ func (b *Broker) Shutdown(ctx context.Context) error {
 		// underneath a handler still using it.
 		go func() {
 			<-done
+			b.stopAckLoop()
+			_ = b.flushAllAcks()
 			b.closeOnce.Do(func() { _ = b.store.Close() })
 		}()
 		return ctx.Err()

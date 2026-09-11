@@ -145,6 +145,44 @@ func TestPostgres_EnqueueBatchEmpty(t *testing.T) {
 	}
 }
 
+func TestPostgres_EnqueueBatchRollsBackOnDuplicateID(t *testing.T) {
+	s := newTestPostgres(t)
+	ctx := context.Background()
+	mustPgEnqueue(t, s, "q", Message{ID: "dupe"})
+
+	err := s.EnqueueBatch(ctx, "q", []Message{{ID: "a"}, {ID: "dupe"}, {ID: "c"}})
+	if err == nil {
+		t.Fatal("EnqueueBatch succeeded with duplicate ID")
+	}
+	got, err := s.Dequeue(ctx, "q", 10)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "dupe" {
+		t.Fatalf("after failed batch, got %v, want only [dupe]", ids(got))
+	}
+}
+
+func TestPostgres_EnqueueBatchPreservesDurableDedupe(t *testing.T) {
+	s := newTestPostgres(t)
+	ctx := context.Background()
+	mustPgEnqueue(t, s, "q", Message{ID: "first", DedupeKey: "same"})
+
+	if err := s.EnqueueBatch(ctx, "q", []Message{
+		{ID: "duplicate", DedupeKey: "same"},
+		{ID: "other"},
+	}); err != nil {
+		t.Fatalf("EnqueueBatch: %v", err)
+	}
+	got, err := s.Dequeue(ctx, "q", 10)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if len(got) != 2 || got[0].ID != "first" || got[1].ID != "other" {
+		t.Fatalf("got %v, want [first other]", ids(got))
+	}
+}
+
 func TestPostgres_DequeueFIFOOrder(t *testing.T) {
 	s := newTestPostgres(t)
 	ctx := context.Background()

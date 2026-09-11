@@ -45,9 +45,12 @@ func (c *closeCounter) Close() error {
 
 type enqueueCountingStore struct {
 	storage.Storage
-	enqueues  int
-	batches   int
-	failBatch bool
+	enqueues     int
+	batches      int
+	ackBatches   int
+	failBatch    bool
+	ackBatchCh   chan struct{}
+	failAckBatch bool
 }
 
 func (s *enqueueCountingStore) Enqueue(ctx context.Context, queue string, msg storage.Message) error {
@@ -61,6 +64,20 @@ func (s *enqueueCountingStore) EnqueueBatch(ctx context.Context, queue string, m
 		return errors.New("batch failed")
 	}
 	return s.Storage.EnqueueBatch(ctx, queue, messages)
+}
+func (s *enqueueCountingStore) AckBatch(ctx context.Context, queue string, ids []string) error {
+	s.ackBatches++
+	if s.failAckBatch {
+		return errors.New("ack batch failed")
+	}
+	err := s.Storage.AckBatch(ctx, queue, ids)
+	if err == nil && s.ackBatchCh != nil {
+		select {
+		case s.ackBatchCh <- struct{}{}:
+		default:
+		}
+	}
+	return err
 }
 
 func TestEnqueueUsesSingleStoragePath(t *testing.T) {
@@ -98,6 +115,7 @@ func TestEnqueueBatchRollsBackDedupeOnStoreFailure(t *testing.T) {
 	err := b.EnqueueBatch(context.Background(), "q", []EnqueueBatchItem{
 		{Payload: []byte("failed"), Opts: EnqueueOpts{DedupeKey: "k"}},
 	})
+
 	if err == nil {
 		t.Fatal("EnqueueBatch succeeded despite storage failure")
 	}
@@ -111,6 +129,114 @@ func TestEnqueueBatchRollsBackDedupeOnStoreFailure(t *testing.T) {
 	}
 	if len(msgs) != 1 || string(msgs[0].Payload) != "retry" {
 		t.Fatalf("dequeued = %v, want retry", msgs)
+	}
+}
+func TestAckBatchFlushesOnSize(t *testing.T) {
+	store := &enqueueCountingStore{
+		Storage:    storage.NewMemory(),
+		ackBatchCh: make(chan struct{}, 1),
+	}
+	b := New(Options{
+		Storage:          store,
+		Concurrency:      1,
+		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		AckBatchSize:     2,
+		AckFlushInterval: time.Hour,
+	})
+	defer b.Shutdown(context.Background())
+	b.Register("q", func(context.Context, storage.Message) error { return nil }, HandlerOptions{})
+
+	for _, payload := range []string{"a", "b"} {
+		if err := b.Enqueue(context.Background(), "q", []byte(payload), EnqueueOpts{}); err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+	}
+	waitForAckBatch(t, store.ackBatchCh)
+	if store.ackBatches != 1 {
+		t.Fatalf("ack batches = %d, want 1", store.ackBatches)
+	}
+}
+
+func TestAckBatchFlushesOnInterval(t *testing.T) {
+	store := &enqueueCountingStore{
+		Storage:    storage.NewMemory(),
+		ackBatchCh: make(chan struct{}, 1),
+	}
+	b := New(Options{
+		Storage:          store,
+		Concurrency:      1,
+		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		AckBatchSize:     100,
+		AckFlushInterval: 5 * time.Millisecond,
+	})
+	defer b.Shutdown(context.Background())
+	b.Register("q", func(context.Context, storage.Message) error { return nil }, HandlerOptions{})
+
+	if err := b.Enqueue(context.Background(), "q", []byte("a"), EnqueueOpts{}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	waitForAckBatch(t, store.ackBatchCh)
+}
+
+func TestAckBatchFlushesOnDrainAndShutdown(t *testing.T) {
+	t.Run("drain", func(t *testing.T) {
+		store := &enqueueCountingStore{
+			Storage:    storage.NewMemory(),
+			ackBatchCh: make(chan struct{}, 1),
+		}
+		b := New(Options{
+			Storage:          store,
+			Concurrency:      1,
+			Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+			AckBatchSize:     100,
+			AckFlushInterval: time.Hour,
+		})
+		b.Register("q", func(context.Context, storage.Message) error { return nil }, HandlerOptions{})
+		if err := b.Enqueue(context.Background(), "q", []byte("a"), EnqueueOpts{}); err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+		if err := b.Drain(context.Background(), "q"); err != nil {
+			t.Fatalf("Drain: %v", err)
+		}
+		if store.ackBatches != 1 {
+			t.Fatalf("ack batches = %d, want 1", store.ackBatches)
+		}
+		if err := b.Shutdown(context.Background()); err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	})
+
+	t.Run("shutdown", func(t *testing.T) {
+		store := &enqueueCountingStore{
+			Storage:    storage.NewMemory(),
+			ackBatchCh: make(chan struct{}, 1),
+		}
+		b := New(Options{
+			Storage:          store,
+			Concurrency:      1,
+			Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+			AckBatchSize:     100,
+			AckFlushInterval: time.Hour,
+		})
+		b.Register("q", func(context.Context, storage.Message) error { return nil }, HandlerOptions{})
+		if err := b.Enqueue(context.Background(), "q", []byte("a"), EnqueueOpts{}); err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+		if err := b.Shutdown(context.Background()); err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+		if store.ackBatches != 1 {
+			t.Fatalf("ack batches = %d, want 1", store.ackBatches)
+		}
+	})
+}
+
+func waitForAckBatch(t *testing.T, ch <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for AckBatch")
 	}
 }
 

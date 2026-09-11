@@ -32,6 +32,17 @@ func New(opts Options) (*Queue, error) {
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = 4
 	}
+	if opts.Batching.Enabled {
+		if opts.Batching.AckBatchSize <= 0 {
+			opts.Batching.AckBatchSize = 50
+		}
+		if opts.Batching.AckFlushInterval <= 0 {
+			opts.Batching.AckFlushInterval = 10 * time.Millisecond
+		}
+	} else {
+		opts.Batching.AckBatchSize = 0
+		opts.Batching.AckFlushInterval = 0
+	}
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
@@ -51,9 +62,11 @@ func New(opts Options) (*Queue, error) {
 	metrics := NewMetrics("", opts.MetricsRegistry)
 	q := &Queue{
 		b: broker.New(broker.Options{
-			Storage:     store,
-			Concurrency: opts.Concurrency,
-			Logger:      opts.Logger,
+			Storage:          store,
+			Concurrency:      opts.Concurrency,
+			Logger:           opts.Logger,
+			AckBatchSize:     opts.Batching.AckBatchSize,
+			AckFlushInterval: opts.Batching.AckFlushInterval,
 			Dedupe: broker.DedupeOptions{
 				Policy:   broker.DedupePolicy(opts.Dedupe.Policy),
 				Capacity: opts.Dedupe.Capacity,
@@ -133,9 +146,10 @@ func (q *Queue) Enqueue(queue string, payload []byte, opts ...EnqueueOpt) error 
 	})
 }
 
-// EnqueueBatch adds multiple messages to the queue in one durable storage
-// operation. Each item carries its own options. The call returns once the batch
-// is durably stored; handlers still run asynchronously.
+// EnqueueBatch adds multiple messages to the queue in one storage operation.
+// SQLite and Postgres commit the batch transactionally; Memory stores it
+// in-process. Each item carries its own options. The call returns once the
+// batch is stored; handlers still run asynchronously.
 func (q *Queue) EnqueueBatch(queue string, items []EnqueueBatchItem) error {
 	if !naming.ValidQueueName(queue) {
 		return fmt.Errorf("shoebox: invalid queue name %q", queue)
