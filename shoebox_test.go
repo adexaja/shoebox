@@ -77,6 +77,29 @@ func TestMetrics_ProcessedAndErrors(t *testing.T) {
 	}, 3*time.Second)
 }
 
+func TestEnqueueBatchProcessesPayloads(t *testing.T) {
+	q := newTestQueue(t)
+	seen := make(chan string, 3)
+	q.Handle("jobs", func(_ context.Context, m Message) error {
+		seen <- string(m.Payload)
+		return nil
+	})
+
+	if err := q.EnqueueBatch("jobs", []EnqueueBatchItem{{Payload: []byte("a")}, {Payload: []byte("b")}, {Payload: []byte("c")}}); err != nil {
+		t.Fatalf("EnqueueBatch: %v", err)
+	}
+
+	got := map[string]bool{}
+	for len(got) < 3 {
+		select {
+		case payload := <-seen:
+			got[payload] = true
+		case <-time.After(3 * time.Second):
+			t.Fatalf("processed payloads = %v, want a/b/c", got)
+		}
+	}
+}
+
 // TestPanicRecovery verifies that a panicking handler is recovered, converted
 // to an error, and does not crash the broker. The message should be retried
 // (or DLQ'd if MaxRetries is 0).

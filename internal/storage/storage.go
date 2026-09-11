@@ -119,11 +119,11 @@ var ErrEmpty = errors.New("shoebox/storage: queue empty")
 
 // Storage is the interface every backend implements.
 //
-// Enqueue persists a new message. Dequeue returns up to `limit` messages
-// that are due (ScheduledAt <= now), atomically transitioning them to an
-// in-flight state (SQLite/Postgres: status='processing'; Memory: removed
-// from the pending slice). Ack confirms successful processing and removes
-// the message.
+// Enqueue persists a new message. EnqueueBatch persists multiple messages in
+// one committed operation. Dequeue returns up to `limit` messages that are due
+// (ScheduledAt <= now), atomically transitioning them to an in-flight state
+// (SQLite/Postgres: status='processing'; Memory: removed from the pending
+// slice). Ack and AckBatch confirm successful processing and remove messages.
 //
 // Retry atomically records a failed delivery and persists the updated
 // message for a future delivery. DeadLetter atomically moves a failed
@@ -134,8 +134,10 @@ var ErrEmpty = errors.New("shoebox/storage: queue empty")
 // backend).
 type Storage interface {
 	Enqueue(ctx context.Context, queue string, m Message) error
+	EnqueueBatch(ctx context.Context, queue string, messages []Message) error
 	Dequeue(ctx context.Context, queue string, limit int) ([]Message, error)
 	Ack(ctx context.Context, queue string, msgID string) error
+	AckBatch(ctx context.Context, queue string, msgIDs []string) error
 	Retry(ctx context.Context, queue string, m Message, err error) error
 	DeadLetter(ctx context.Context, queue string, m Message, err error) error
 	Replay(ctx context.Context, queue string, msgID string) error

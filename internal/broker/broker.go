@@ -15,13 +15,16 @@ import (
 	"github.com/adexaja/shoebox/internal/storage"
 )
 
+// Options configures the internal broker and optional acknowledgement batching.
 type Options struct {
-	Storage       storage.Storage
-	Concurrency   int
-	Logger        *slog.Logger
-	Dedupe        DedupeOptions
-	DedupeMetrics DedupeMetrics
-	DurableDedupe bool
+	Storage          storage.Storage
+	Concurrency      int
+	Logger           *slog.Logger
+	Dedupe           DedupeOptions
+	DedupeMetrics    DedupeMetrics
+	DurableDedupe    bool
+	AckBatchSize     int
+	AckFlushInterval time.Duration
 }
 
 // DedupeMetrics receives optional deduplication instrumentation from the
@@ -59,6 +62,14 @@ type Broker struct {
 	abortOnce sync.Once
 	abortCh   chan struct{}
 	wg        sync.WaitGroup // counts dispatchers + workers; Shutdown waits on this
+
+	ackMu            sync.Mutex
+	pendingAcks      map[string][]string
+	ackBatchSize     int
+	ackFlushInterval time.Duration
+	ackStop          chan struct{}
+	ackStopOnce      sync.Once
+	ackWG            sync.WaitGroup
 
 	closeOnce sync.Once
 	closed    atomic.Bool
@@ -110,23 +121,31 @@ func New(opts Options) *Broker {
 		dedupe = newTTLDedupeStore()
 	}
 	b := &Broker{
-		store:         opts.Storage,
-		concurrency:   opts.Concurrency,
-		logger:        opts.Logger,
-		handlers:      make(map[string]*handler),
-		dispatchC:     make(map[string]chan struct{}),
-		dispatching:   make(map[string]bool),
-		inflight:      make(map[string]*atomic.Int64),
-		stopCh:        make(chan struct{}),
-		abortCh:       make(chan struct{}),
-		shutdownCtx:   context.Background(),
-		dedupe:        dedupe,
-		dedupeMetrics: opts.DedupeMetrics,
-		dedupeTTL:     DefaultDedupeTTL,
-		durableDedupe: opts.DurableDedupe,
-		paused:        make(map[string]*atomic.Bool),
-		qDraining:     make(map[string]*atomic.Bool),
-		drainDone:     make(map[string]chan struct{}),
+		store:            opts.Storage,
+		concurrency:      opts.Concurrency,
+		logger:           opts.Logger,
+		handlers:         make(map[string]*handler),
+		dispatchC:        make(map[string]chan struct{}),
+		dispatching:      make(map[string]bool),
+		inflight:         make(map[string]*atomic.Int64),
+		stopCh:           make(chan struct{}),
+		abortCh:          make(chan struct{}),
+		shutdownCtx:      context.Background(),
+		dedupe:           dedupe,
+		dedupeMetrics:    opts.DedupeMetrics,
+		dedupeTTL:        DefaultDedupeTTL,
+		durableDedupe:    opts.DurableDedupe,
+		paused:           make(map[string]*atomic.Bool),
+		qDraining:        make(map[string]*atomic.Bool),
+		drainDone:        make(map[string]chan struct{}),
+		ackBatchSize:     opts.AckBatchSize,
+		ackFlushInterval: opts.AckFlushInterval,
+	}
+	if b.ackBatchSize > 0 && b.ackFlushInterval > 0 {
+		b.pendingAcks = make(map[string][]string)
+		b.ackStop = make(chan struct{})
+		b.ackWG.Add(1)
+		go b.ackLoop()
 	}
 	if schedules, ok := opts.Storage.(storage.ScheduleStore); ok {
 		b.scheduleStore = schedules
@@ -197,47 +216,52 @@ func (b *Broker) storeCtx() context.Context {
 // including during Shutdown — the broker is designed to drain in-flight
 // work before stopping.
 func (b *Broker) Enqueue(ctx context.Context, queue string, payload []byte, opts EnqueueOpts) error {
-	// Durable Postgres dedupe is enforced by the storage unique index.
-	if !b.durableDedupe && opts.DedupeKey != "" && b.dedupe.SeenOrAdd(queue+":"+opts.DedupeKey, b.dedupeTTL) {
-		if b.dedupeMetrics != nil {
-			b.dedupeMetrics.DedupeHit(queue)
-			b.dedupeMetrics.DedupeEntries(b.dedupe.Len())
-		}
+	now := time.Now()
+	msg, dedupeKey, ok := b.enqueueMessage(queue, payload, opts, now, now, false)
+	if !ok {
 		return nil
 	}
-	if !b.durableDedupe && opts.DedupeKey != "" && b.dedupeMetrics != nil {
-		b.dedupeMetrics.DedupeMiss(queue)
-		b.dedupeMetrics.DedupeEntries(b.dedupe.Len())
-	}
-	if b.durableDedupe && opts.DedupeKey != "" && b.dedupeMetrics != nil {
-		b.dedupeMetrics.DedupeMiss(queue)
-	}
-
-	now := time.Now()
-	scheduled := now
-	switch {
-	case !opts.Schedule.IsZero():
-		scheduled = opts.Schedule
-	case opts.Delay > 0:
-		scheduled = now.Add(opts.Delay)
-	}
-
-	msg := storage.Message{
-		ID:          storage.NewMessageID(),
-		Queue:       queue,
-		Payload:     payload,
-		Attempts:    0,
-		MaxRetries:  0, // filled in by dispatcher; not used at enqueue time
-		CreatedAt:   now,
-		ScheduledAt: scheduled,
-		Priority:    opts.Priority,
-		DedupeKey:   opts.DedupeKey,
-		Metadata:    opts.Metadata,
-	}
 	if err := b.store.Enqueue(ctx, queue, msg); err != nil {
+		b.rollbackDedupe([]string{dedupeKey})
 		return err
 	}
 
+	b.wake(queue)
+	return nil
+}
+
+// EnqueueBatch adds messages to the queue in one storage operation and pokes
+// the dispatcher once. The call returns after the batch is stored.
+func (b *Broker) EnqueueBatch(ctx context.Context, queue string, items []EnqueueBatchItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+	now := time.Now()
+	messages := make([]storage.Message, 0, len(items))
+	dedupeKeys := make([]string, 0, len(items))
+	for _, item := range items {
+		createdAt := now.Add(time.Duration(len(messages)) * time.Microsecond)
+		msg, dedupeKey, ok := b.enqueueMessage(queue, item.Payload, item.Opts, createdAt, now, true)
+		if ok {
+			messages = append(messages, msg)
+		}
+		if dedupeKey != "" {
+			dedupeKeys = append(dedupeKeys, dedupeKey)
+		}
+	}
+	if len(messages) == 0 {
+		return nil
+	}
+	if err := b.store.EnqueueBatch(ctx, queue, messages); err != nil {
+		b.rollbackDedupe(dedupeKeys)
+		return err
+	}
+
+	b.wake(queue)
+	return nil
+}
+
+func (b *Broker) wake(queue string) {
 	b.hMu.RLock()
 	wake, ok := b.dispatchC[queue]
 	b.hMu.RUnlock()
@@ -247,7 +271,66 @@ func (b *Broker) Enqueue(ctx context.Context, queue string, payload []byte, opts
 		default:
 		}
 	}
-	return nil
+}
+
+func (b *Broker) rollbackDedupe(keys []string) {
+	for _, key := range keys {
+		if key != "" {
+			b.dedupe.Delete(key)
+		}
+	}
+	if len(keys) > 0 && b.dedupeMetrics != nil {
+		b.dedupeMetrics.DedupeEntries(b.dedupe.Len())
+	}
+}
+
+func (b *Broker) enqueueMessage(queue string, payload []byte, opts EnqueueOpts, createdAt, scheduledAt time.Time, copyMetadata bool) (storage.Message, string, bool) {
+	var addedDedupeKey string
+	// Durable Postgres dedupe is enforced by the storage unique index.
+	if !b.durableDedupe && opts.DedupeKey != "" {
+		addedDedupeKey = queue + ":" + opts.DedupeKey
+		if b.dedupe.SeenOrAdd(addedDedupeKey, b.dedupeTTL) {
+			if b.dedupeMetrics != nil {
+				b.dedupeMetrics.DedupeHit(queue)
+				b.dedupeMetrics.DedupeEntries(b.dedupe.Len())
+			}
+			return storage.Message{}, "", false
+		}
+	}
+	if !b.durableDedupe && opts.DedupeKey != "" && b.dedupeMetrics != nil {
+		b.dedupeMetrics.DedupeMiss(queue)
+		b.dedupeMetrics.DedupeEntries(b.dedupe.Len())
+	}
+	if b.durableDedupe && opts.DedupeKey != "" && b.dedupeMetrics != nil {
+		b.dedupeMetrics.DedupeMiss(queue)
+	}
+
+	switch {
+	case !opts.Schedule.IsZero():
+		scheduledAt = opts.Schedule
+	case opts.Delay > 0:
+		scheduledAt = scheduledAt.Add(opts.Delay)
+	}
+
+	metadata := opts.Metadata
+	if copyMetadata && len(metadata) > 0 {
+		metadata = make(map[string]string, len(opts.Metadata))
+		for k, v := range opts.Metadata {
+			metadata[k] = v
+		}
+	}
+	return storage.Message{
+		ID:          storage.NewMessageID(),
+		Queue:       queue,
+		Payload:     payload,
+		Attempts:    0,
+		MaxRetries:  0, // filled in by dispatcher; not used at enqueue time
+		CreatedAt:   createdAt,
+		ScheduledAt: scheduledAt,
+		Priority:    opts.Priority,
+		DedupeKey:   opts.DedupeKey,
+		Metadata:    metadata,
+	}, addedDedupeKey, true
 }
 
 // EnqueueOpts is the broker's view of the public EnqueueOptions.
@@ -257,6 +340,12 @@ type EnqueueOpts struct {
 	Priority  int
 	DedupeKey string
 	Metadata  map[string]string
+}
+
+// EnqueueBatchItem carries one broker message and its resolved options.
+type EnqueueBatchItem struct {
+	Payload []byte
+	Opts    EnqueueOpts
 }
 
 // dispatch is the per-queue worker loop. It runs `concurrency` handlers
@@ -364,6 +453,11 @@ func (b *Broker) drainComplete(queue string) bool {
 	if !b.quiescent(queue) {
 		return false
 	}
+	if err := b.flushAcks(queue); err != nil {
+		b.logger.ErrorContext(b.storeCtx(), "shoebox: drain ack flush failed",
+			slog.String("queue", queue), slog.Any("err", err))
+		return false
+	}
 
 	stats, err := b.store.Stats(b.storeCtx(), queue)
 	if err != nil {
@@ -439,7 +533,7 @@ func (b *Broker) handleOne(queue string, msg storage.Message) {
 	defer cancel()
 	err := h.chain(ctx, msg)
 	if err == nil {
-		if err := b.store.Ack(b.storeCtx(), queue, msg.ID); err != nil {
+		if err := b.ack(queue, msg.ID); err != nil {
 			b.logger.ErrorContext(b.storeCtx(), "shoebox: ack failed",
 				slog.String("queue", queue), slog.String("id", msg.ID), slog.Any("err", err))
 		}
@@ -464,6 +558,82 @@ func (b *Broker) handleOne(queue string, msg storage.Message) {
 		b.logger.ErrorContext(b.storeCtx(), "shoebox: retry transition failed",
 			slog.String("queue", queue), slog.String("id", msg.ID), slog.Any("err", err))
 	}
+}
+
+func (b *Broker) ack(queue, msgID string) error {
+	if b.ackBatchSize <= 0 || b.ackStop == nil {
+		return b.store.Ack(b.storeCtx(), queue, msgID)
+	}
+
+	b.ackMu.Lock()
+	b.pendingAcks[queue] = append(b.pendingAcks[queue], msgID)
+	flush := len(b.pendingAcks[queue]) >= b.ackBatchSize
+	b.ackMu.Unlock()
+	if flush {
+		return b.flushAcks(queue)
+	}
+	return nil
+}
+
+func (b *Broker) ackLoop() {
+	defer b.ackWG.Done()
+	ticker := time.NewTicker(b.ackFlushInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if err := b.flushAllAcks(); err != nil {
+				b.logger.ErrorContext(b.storeCtx(), "shoebox: ack batch flush failed",
+					slog.Any("err", err))
+			}
+		case <-b.ackStop:
+			return
+		}
+	}
+}
+
+func (b *Broker) flushAcks(queue string) error {
+	b.ackMu.Lock()
+	ids := b.pendingAcks[queue]
+	delete(b.pendingAcks, queue)
+	b.ackMu.Unlock()
+	if len(ids) == 0 {
+		return nil
+	}
+
+	if err := b.store.AckBatch(b.storeCtx(), queue, ids); err != nil {
+		b.ackMu.Lock()
+		b.pendingAcks[queue] = append(ids, b.pendingAcks[queue]...)
+		b.ackMu.Unlock()
+		return err
+	}
+	return nil
+}
+
+func (b *Broker) flushAllAcks() error {
+	b.ackMu.Lock()
+	queues := make([]string, 0, len(b.pendingAcks))
+	for queue := range b.pendingAcks {
+		queues = append(queues, queue)
+	}
+	b.ackMu.Unlock()
+
+	var firstErr error
+	for _, queue := range queues {
+		if err := b.flushAcks(queue); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func (b *Broker) stopAckLoop() {
+	b.ackStopOnce.Do(func() {
+		if b.ackStop != nil {
+			close(b.ackStop)
+		}
+	})
+	b.ackWG.Wait()
 }
 
 // handlerCtx builds the context handed to a handler: a cancellation that
@@ -526,8 +696,10 @@ func (b *Broker) Shutdown(ctx context.Context) error {
 	go func() { b.wg.Wait(); close(done) }()
 	select {
 	case <-done:
+		b.stopAckLoop()
+		err := b.flushAllAcks()
 		b.closeOnce.Do(func() { _ = b.store.Close() })
-		return nil
+		return err
 	case <-ctx.Done():
 		// Force-abort: dispatchers exit immediately; workers finish on their
 		// own (wg covers them). We MUST still wait for wg so we don't close
@@ -538,6 +710,8 @@ func (b *Broker) Shutdown(ctx context.Context) error {
 		// underneath a handler still using it.
 		go func() {
 			<-done
+			b.stopAckLoop()
+			_ = b.flushAllAcks()
 			b.closeOnce.Do(func() { _ = b.store.Close() })
 		}()
 		return ctx.Err()

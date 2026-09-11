@@ -43,6 +43,203 @@ func (c *closeCounter) Close() error {
 	return nil
 }
 
+type enqueueCountingStore struct {
+	storage.Storage
+	enqueues     int
+	batches      int
+	ackBatches   int
+	failBatch    bool
+	ackBatchCh   chan struct{}
+	failAckBatch bool
+}
+
+func (s *enqueueCountingStore) Enqueue(ctx context.Context, queue string, msg storage.Message) error {
+	s.enqueues++
+	return s.Storage.Enqueue(ctx, queue, msg)
+}
+
+func (s *enqueueCountingStore) EnqueueBatch(ctx context.Context, queue string, messages []storage.Message) error {
+	s.batches++
+	if s.failBatch {
+		return errors.New("batch failed")
+	}
+	return s.Storage.EnqueueBatch(ctx, queue, messages)
+}
+func (s *enqueueCountingStore) AckBatch(ctx context.Context, queue string, ids []string) error {
+	s.ackBatches++
+	if s.failAckBatch {
+		return errors.New("ack batch failed")
+	}
+	err := s.Storage.AckBatch(ctx, queue, ids)
+	if err == nil && s.ackBatchCh != nil {
+		select {
+		case s.ackBatchCh <- struct{}{}:
+		default:
+		}
+	}
+	return err
+}
+
+func TestEnqueueUsesSingleStoragePath(t *testing.T) {
+	store := &enqueueCountingStore{Storage: storage.NewMemory()}
+	b := quietBroker(t, store, 1)
+
+	if err := b.Enqueue(context.Background(), "q", []byte("x"), EnqueueOpts{}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if store.enqueues != 1 || store.batches != 0 {
+		t.Fatalf("calls: Enqueue=%d EnqueueBatch=%d, want 1/0", store.enqueues, store.batches)
+	}
+}
+
+func TestEnqueueBatchUsesBatchStoragePath(t *testing.T) {
+	store := &enqueueCountingStore{Storage: storage.NewMemory()}
+	b := quietBroker(t, store, 1)
+
+	if err := b.EnqueueBatch(context.Background(), "q", []EnqueueBatchItem{
+		{Payload: []byte("a")},
+		{Payload: []byte("b")},
+	}); err != nil {
+		t.Fatalf("EnqueueBatch: %v", err)
+	}
+	if store.enqueues != 0 || store.batches != 1 {
+		t.Fatalf("calls: Enqueue=%d EnqueueBatch=%d, want 0/1", store.enqueues, store.batches)
+	}
+}
+
+func TestEnqueueBatchRollsBackDedupeOnStoreFailure(t *testing.T) {
+	mem := storage.NewMemory()
+	store := &enqueueCountingStore{Storage: mem, failBatch: true}
+	b := quietBroker(t, store, 1)
+
+	err := b.EnqueueBatch(context.Background(), "q", []EnqueueBatchItem{
+		{Payload: []byte("failed"), Opts: EnqueueOpts{DedupeKey: "k"}},
+	})
+
+	if err == nil {
+		t.Fatal("EnqueueBatch succeeded despite storage failure")
+	}
+	store.failBatch = false
+	if err := b.Enqueue(context.Background(), "q", []byte("retry"), EnqueueOpts{DedupeKey: "k"}); err != nil {
+		t.Fatalf("Enqueue retry: %v", err)
+	}
+	msgs, err := mem.Dequeue(context.Background(), "q", 1)
+	if err != nil {
+		t.Fatalf("Dequeue retry: %v", err)
+	}
+	if len(msgs) != 1 || string(msgs[0].Payload) != "retry" {
+		t.Fatalf("dequeued = %v, want retry", msgs)
+	}
+}
+func TestAckBatchFlushesOnSize(t *testing.T) {
+	store := &enqueueCountingStore{
+		Storage:    storage.NewMemory(),
+		ackBatchCh: make(chan struct{}, 1),
+	}
+	b := New(Options{
+		Storage:          store,
+		Concurrency:      1,
+		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		AckBatchSize:     2,
+		AckFlushInterval: time.Hour,
+	})
+	defer func() { _ = b.Shutdown(context.Background()) }()
+	b.Register("q", func(context.Context, storage.Message) error { return nil }, HandlerOptions{})
+
+	for _, payload := range []string{"a", "b"} {
+		if err := b.Enqueue(context.Background(), "q", []byte(payload), EnqueueOpts{}); err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+	}
+	waitForAckBatch(t, store.ackBatchCh)
+	if store.ackBatches != 1 {
+		t.Fatalf("ack batches = %d, want 1", store.ackBatches)
+	}
+}
+
+func TestAckBatchFlushesOnInterval(t *testing.T) {
+	store := &enqueueCountingStore{
+		Storage:    storage.NewMemory(),
+		ackBatchCh: make(chan struct{}, 1),
+	}
+	b := New(Options{
+		Storage:          store,
+		Concurrency:      1,
+		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		AckBatchSize:     100,
+		AckFlushInterval: 5 * time.Millisecond,
+	})
+	defer func() { _ = b.Shutdown(context.Background()) }()
+	b.Register("q", func(context.Context, storage.Message) error { return nil }, HandlerOptions{})
+
+	if err := b.Enqueue(context.Background(), "q", []byte("a"), EnqueueOpts{}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	waitForAckBatch(t, store.ackBatchCh)
+}
+
+func TestAckBatchFlushesOnDrainAndShutdown(t *testing.T) {
+	t.Run("drain", func(t *testing.T) {
+		store := &enqueueCountingStore{
+			Storage:    storage.NewMemory(),
+			ackBatchCh: make(chan struct{}, 1),
+		}
+		b := New(Options{
+			Storage:          store,
+			Concurrency:      1,
+			Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+			AckBatchSize:     100,
+			AckFlushInterval: time.Hour,
+		})
+		b.Register("q", func(context.Context, storage.Message) error { return nil }, HandlerOptions{})
+		if err := b.Enqueue(context.Background(), "q", []byte("a"), EnqueueOpts{}); err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+		if err := b.Drain(context.Background(), "q"); err != nil {
+			t.Fatalf("Drain: %v", err)
+		}
+		if store.ackBatches != 1 {
+			t.Fatalf("ack batches = %d, want 1", store.ackBatches)
+		}
+		if err := b.Shutdown(context.Background()); err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	})
+
+	t.Run("shutdown", func(t *testing.T) {
+		store := &enqueueCountingStore{
+			Storage:    storage.NewMemory(),
+			ackBatchCh: make(chan struct{}, 1),
+		}
+		b := New(Options{
+			Storage:          store,
+			Concurrency:      1,
+			Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+			AckBatchSize:     100,
+			AckFlushInterval: time.Hour,
+		})
+		b.Register("q", func(context.Context, storage.Message) error { return nil }, HandlerOptions{})
+		if err := b.Enqueue(context.Background(), "q", []byte("a"), EnqueueOpts{}); err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+		if err := b.Shutdown(context.Background()); err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+		if store.ackBatches != 1 {
+			t.Fatalf("ack batches = %d, want 1", store.ackBatches)
+		}
+	})
+}
+
+func waitForAckBatch(t *testing.T, ch <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for AckBatch")
+	}
+}
+
 // TestShutdown_DrainFollowupDuringDrain is the regression test for E1-CONC-1
 // and E1-CONC-4. It forces the exact race the audit described: a handler,
 // while Shutdown is draining, enqueues a follow-up message *after* the

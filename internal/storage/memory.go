@@ -58,6 +58,32 @@ func (m *Memory) Enqueue(_ context.Context, queue string, msg Message) error {
 	return nil
 }
 
+// EnqueueBatch appends messages to the tail of its queue.
+func (m *Memory) EnqueueBatch(_ context.Context, queue string, messages []Message) error {
+	if len(messages) == 0 {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	for i, msg := range messages {
+		assignedCreatedAt := msg.CreatedAt.IsZero()
+		if assignedCreatedAt {
+			msg.CreatedAt = now.Add(time.Duration(i) * time.Microsecond)
+		}
+		if msg.ScheduledAt.IsZero() {
+			if assignedCreatedAt {
+				msg.ScheduledAt = now
+			} else {
+				msg.ScheduledAt = msg.CreatedAt
+			}
+		}
+		m.queues[queue] = append(m.queues[queue], msg)
+	}
+	m.dirty[queue] = true
+	return nil
+}
+
 // Dequeue returns up to `limit` messages whose ScheduledAt is in the past,
 // in FIFO order. The messages are removed from the pending set; the broker
 // is expected to Ack, Retry, or DeadLetter them.
@@ -128,6 +154,27 @@ func (m *Memory) Ack(_ context.Context, queue, msgID string) error {
 	}
 	delete(m.inflight[queue], msgID)
 	m.statsFor(queue).Processed++
+	return nil
+}
+
+// AckBatch removes processing messages and increments processed for rows removed.
+func (m *Memory) AckBatch(_ context.Context, queue string, msgIDs []string) error {
+	if len(msgIDs) == 0 {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var processed uint64
+	for _, msgID := range msgIDs {
+		if _, ok := m.inflight[queue][msgID]; !ok {
+			continue
+		}
+		delete(m.inflight[queue], msgID)
+		processed++
+	}
+	if processed > 0 {
+		m.statsFor(queue).Processed += processed
+	}
 	return nil
 }
 

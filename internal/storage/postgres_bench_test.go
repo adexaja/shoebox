@@ -60,6 +60,64 @@ func BenchmarkPostgresEnqueue(b *testing.B) {
 	}
 }
 
+// BenchmarkPostgresEnqueueBatch measures one transaction per batch.
+func BenchmarkPostgresEnqueueBatch(b *testing.B) {
+	for _, size := range []int{1, 10, 50, 100} {
+		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
+			s := newBenchPostgres(b)
+			ctx := context.Background()
+			batch := make([]Message, size)
+			b.ReportAllocs()
+			b.ReportMetric(float64(size), "messages/op")
+			b.ResetTimer()
+			for i := range b.N {
+				for j := range batch {
+					batch[j] = benchMsg(fmt.Sprintf("batch-%d-%d", i, j))
+				}
+				if err := s.EnqueueBatch(ctx, "q", batch); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*size), "ns/message")
+		})
+	}
+}
+
+// BenchmarkPostgresAckBatch measures deleting processing rows in one transaction.
+func BenchmarkPostgresAckBatch(b *testing.B) {
+	for _, size := range []int{1, 10, 50, 100} {
+		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
+			s := newBenchPostgres(b)
+			ctx := context.Background()
+			b.ReportAllocs()
+			b.ReportMetric(float64(size), "messages/op")
+			for i := range b.N {
+				b.StopTimer()
+				messages := make([]Message, size)
+				for j := range messages {
+					messages[j] = benchMsg(fmt.Sprintf("ack-%d-%d", i, j))
+				}
+				if err := s.EnqueueBatch(ctx, "q", messages); err != nil {
+					b.Fatal(err)
+				}
+				claimed, err := s.Dequeue(ctx, "q", size)
+				if err != nil {
+					b.Fatal(err)
+				}
+				ids := make([]string, len(claimed))
+				for j := range claimed {
+					ids[j] = claimed[j].ID
+				}
+				b.StartTimer()
+				if err := s.AckBatch(ctx, "q", ids); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*size), "ns/message")
+		})
+	}
+}
+
 // BenchmarkPostgresDequeue measures the dequeue path at a fixed queue depth:
 // a transaction that SELECTs the next due message (FOR UPDATE SKIP LOCKED)
 // and transitions it to 'processing'. Each iteration Acks the dequeued
